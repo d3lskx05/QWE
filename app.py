@@ -1,118 +1,63 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
 import altair as alt
-from sentence_transformers import util
+import json
+import io
 
 from utils import (
-    preprocess_text, read_uploaded_file_bytes, parse_topics_field,
-    jaccard_tokens, style_suspicious_and_low, simple_flags, pos_first_token,
-    bootstrap_diff_ci
+    preprocess_text, parse_topics_field, read_uploaded_file_bytes,
+    simple_flags, pos_first_token, style_suspicious_and_low,
+    jaccard_tokens, bootstrap_diff_ci
 )
-from model_utils import load_model_from_source, encode_texts_in_batches
+from models import load_model_from_source, encode_texts_in_batches
 
-# ==============================
-# Настройки страницы
-# ==============================
-st.set_page_config(page_title="Семантический поиск", layout="wide")
-st.title("🔍 Семантический поиск по фразам")
+st.set_page_config(page_title="Synonym Checker", layout="wide")
+st.title("🔎 Synonym Checker")
 
-# ==============================
-# Сайдбар — загрузка модели
-# ==============================
-st.sidebar.header("⚙️ Настройки модели")
-source = st.sidebar.selectbox("Источник модели", ["huggingface", "google_drive"])
-identifier = st.sidebar.text_input("ID модели / путь", value="paraphrase-multilingual-MiniLM-L12-v2")
+with st.sidebar:
+    st.header("Настройки модели")
+    model_source = st.radio("Источник модели", ["huggingface", "google_drive"])
+    model_identifier = st.text_input("ID модели", value="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    if st.button("Загрузить модель"):
+        with st.spinner("Загружаем модель..."):
+            model = load_model_from_source(model_source, model_identifier)
+        st.success("Модель загружена!")
 
-if st.sidebar.button("Загрузить модель"):
-    with st.spinner("Загрузка модели..."):
-        model = load_model_from_source(source, identifier)
-        st.session_state["model"] = model
-        st.success("Модель успешно загружена")
+uploaded = st.file_uploader("Загрузите файл (CSV, Excel, JSON)", type=["csv", "xlsx", "json", "ndjson"])
 
-# ==============================
-# Загрузка файлов
-# ==============================
-uploaded_files = st.file_uploader(
-    "Загрузите файлы (CSV, Excel, JSON)", type=["csv", "xlsx", "xls", "json", "ndjson"],
-    accept_multiple_files=True
-)
+if uploaded:
+    try:
+        df, file_hash = read_uploaded_file_bytes(uploaded)
+        st.write(f"Файл загружен: {uploaded.name}, {len(df)} строк")
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
 
-dataframes = []
-hashes = []
-if uploaded_files:
-    for f in uploaded_files:
-        try:
-            df, h = read_uploaded_file_bytes(f)
-            dataframes.append(df)
-            hashes.append(h)
-        except Exception as e:
-            st.error(f"Ошибка в файле {f.name}: {e}")
+    if "text" not in df.columns or "topics" not in df.columns:
+        st.error("Файл должен содержать колонки 'text' и 'topics'")
+        st.stop()
 
-# ==============================
-# Параметры поиска
-# ==============================
-st.sidebar.header("🔍 Параметры поиска")
-query = st.sidebar.text_input("Поисковый запрос")
-semantic_threshold = st.sidebar.slider("Порог семантики", 0.0, 1.0, 0.7, 0.01)
-lexical_threshold = st.sidebar.slider("Порог лексики", 0.0, 1.0, 0.3, 0.01)
-low_score_threshold = st.sidebar.slider("Порог низкого сходства", 0.0, 1.0, 0.5, 0.01)
-top_k = st.sidebar.number_input("Сколько результатов показывать", 1, 100, 10)
+    df["text_clean"] = df["text"].apply(preprocess_text)
+    df["topics_list"] = df["topics"].apply(parse_topics_field)
 
-# ==============================
-# Выполнение поиска
-# ==============================
-if st.button("Запустить поиск"):
-    if "model" not in st.session_state:
-        st.error("Сначала загрузите модель")
-    elif not dataframes:
-        st.error("Загрузите хотя бы один файл")
-    elif not query.strip():
-        st.error("Введите поисковый запрос")
-    else:
-        model = st.session_state["model"]
+    if st.button("Рассчитать сходство"):
+        if "model" not in locals():
+            st.error("Сначала загрузите модель!")
+            st.stop()
+        with st.spinner("Вычисляем эмбеддинги..."):
+            texts = df["text_clean"].tolist()
+            embeddings = encode_texts_in_batches(model, texts)
+            df["embedding"] = list(embeddings)
 
-        # Объединяем все фразы
-        combined_df = pd.concat(dataframes, ignore_index=True)
-        if "phrase" not in combined_df.columns:
-            st.error("В данных нет колонки 'phrase'")
-        else:
-            combined_df["phrase_proc"] = combined_df["phrase"].map(preprocess_text)
+        st.success("Эмбеддинги рассчитаны")
 
-            # Кодируем
-            with st.spinner("Вычисление эмбеддингов..."):
-                query_emb = encode_texts_in_batches(model, [query])[0]
-                corpus_embs = encode_texts_in_batches(model, combined_df["phrase_proc"].tolist())
+        st.subheader("📊 Статистика")
+        st.write(df.head())
 
-            # Семантическое сходство
-            scores = util.cos_sim(query_emb, corpus_embs)[0].cpu().numpy()
-
-            # Лексическое сходство
-            lexical_scores = [jaccard_tokens(query.lower(), p) for p in combined_df["phrase_proc"]]
-
-            # Формируем таблицу
-            results_df = combined_df.copy()
-            results_df["score"] = scores
-            results_df["lexical_score"] = lexical_scores
-
-            # Подсветка подозрительных и низких
-            styled = style_suspicious_and_low(results_df, semantic_threshold, lexical_threshold, low_score_threshold)
-            st.subheader("📋 Результаты")
-            st.dataframe(styled, use_container_width=True)
-
-            # Метрики
-            st.subheader("📊 Метрики")
-            st.write(f"Среднее семантическое сходство: {np.mean(scores):.3f}")
-            st.write(f"Среднее лексическое сходство: {np.mean(lexical_scores):.3f}")
-
-            # График распределения
-            chart_data = pd.DataFrame({
-                "Семантическое": scores,
-                "Лексическое": lexical_scores
-            })
-            chart = alt.Chart(chart_data.reset_index()).mark_circle(size=60).encode(
-                x="Семантическое", y="Лексическое"
-            )
-            st.altair_chart(chart, use_container_width=True)
+        st.download_button(
+            "Скачать результат (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="result.csv",
+            mime="text/csv"
+        )
