@@ -1,12 +1,11 @@
+# models.py
+import tempfile
 import os
 import shutil
-import tempfile
 import zipfile
 import tarfile
-from typing import List
-import numpy as np
-from sentence_transformers import SentenceTransformer
-import streamlit as st
+
+from sentence_transformers import SentenceTransformer, util
 
 def download_file_from_gdrive(file_id: str) -> str:
     import gdown
@@ -32,7 +31,6 @@ def download_file_from_gdrive(file_id: str) -> str:
             pass
     return model_dir
 
-@st.cache_resource(show_spinner=False)
 def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
     if source == "huggingface":
         model_path = identifier
@@ -40,7 +38,8 @@ def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
         model_path = download_file_from_gdrive(identifier)
     else:
         raise ValueError("Unknown model source")
-    return SentenceTransformer(model_path)
+    model = SentenceTransformer(model_path)
+    return model
 
 def encode_texts_in_batches(model, texts: List[str], batch_size: int = 64) -> np.ndarray:
     if not texts:
