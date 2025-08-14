@@ -57,7 +57,7 @@ def parse_topics_field(val) -> List[str]:
         try:
             parsed = json.loads(s)
             if isinstance(parsed, list):
-                return [str(x).strip() for x in parsed if str(x).strip()]
+                return [str(x).strip() for x in parsed if x.strip()]
         except Exception:
             pass
     for sep in [";", "|", ","]:
@@ -91,9 +91,9 @@ def style_suspicious_and_low(df, sem_thresh: float, lex_thresh: float, low_score
         return out
     return df.style.apply(highlight, axis=1)
 
-NEG_PAT = re.compile(r"\bне\b|\bни\b|\bнет\b", flags=re.IGNORECASE)
-NUM_PAT = re.compile(r"\b\d+\b")
-DATE_PAT = re.compile(r"\b\d{1,2}[./-]\d{1,2}([./-]\d{2,4})?\b")
+NEG_PAT = re.compile(r"\\bне\\b|\\bни\\b|\\bнет\\b", flags=re.IGNORECASE)
+NUM_PAT = re.compile(r"\\b\\d+\\b")
+DATE_PAT = re.compile(r"\\b\\d{1,2}[./-]\\d{1,2}([./-]\\d{2,4})?\\b")
 
 def simple_flags(text: str) -> Dict[str, bool]:
     t = text or ""
