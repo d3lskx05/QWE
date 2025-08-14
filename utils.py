@@ -1,13 +1,10 @@
-# utils.py
 import pandas as pd
 import numpy as np
 import hashlib
 import io
 import json
 import re
-from typing import List, Tuple, Dict, Any
-
-# ======== Препроцессинг и парсинг ========
+from typing import Any, List, Tuple, Dict
 
 def preprocess_text(t: Any) -> str:
     if pd.isna(t):
@@ -77,19 +74,11 @@ def jaccard_tokens(a: str, b: str) -> float:
     union = sa | sb
     return len(inter) / len(union) if union else 0.0
 
-# ======== Подсветка ========
-
 def style_suspicious_and_low(df, sem_thresh: float, lex_thresh: float, low_score_thresh: float):
     def highlight(row):
         out = []
-        try:
-            score = float(row.get('score', 0))
-        except Exception:
-            score = 0.0
-        try:
-            lex = float(row.get('lexical_score', 0))
-        except Exception:
-            lex = 0.0
+        score = float(row.get('score', 0) or 0)
+        lex = float(row.get('lexical_score', 0) or 0)
         is_low_score = (score < low_score_thresh)
         is_suspicious = (score >= sem_thresh and lex <= lex_thresh)
         for _ in row:
@@ -101,8 +90,6 @@ def style_suspicious_and_low(df, sem_thresh: float, lex_thresh: float, low_score
                 out.append('')
         return out
     return df.style.apply(highlight, axis=1)
-
-# ======== Простые признаки ========
 
 NEG_PAT = re.compile(r"\bне\b|\bни\b|\bнет\b", flags=re.IGNORECASE)
 NUM_PAT = re.compile(r"\b\d+\b")
@@ -132,8 +119,6 @@ def pos_first_token(text: str) -> str:
         return "NA"
     p = _MORPH.parse(toks[0])[0]
     return str(p.tag.POS) if p and p.tag and p.tag.POS else "NA"
-
-# ======== Бутстрэп ========
 
 def bootstrap_diff_ci(a: np.ndarray, b: np.ndarray, n_boot: int = 500, seed: int = 42, ci: float = 0.95):
     rng = np.random.default_rng(seed)
