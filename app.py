@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import json
 from utils import *
+from utils import _MORPH
 
 st.set_page_config(page_title="Synonym Checker", layout="wide")
 st.title("🔎 Synonym Checker")
