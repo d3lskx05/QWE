@@ -1,3 +1,5 @@
+# utils.py
+
 import pandas as pd
 import numpy as np
 import io
@@ -7,11 +9,12 @@ import tempfile
 import os
 import shutil
 import zipfile
+import time
 import tarfile
 import re
 from typing import List, Tuple, Dict, Any
-from sentence_transformers import SentenceTransformer
-import streamlit as st
+
+from sentence_transformers import SentenceTransformer, util
 
 # ============== Утилиты ==============
 
@@ -24,14 +27,24 @@ def file_md5(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
 
 def _try_read_json(raw: bytes) -> pd.DataFrame:
+    """
+    Пытаемся прочитать JSON/NDJSON в таблицу.
+    Поддержка форматов:
+      - [{"phrase_1": "...", "phrase_2": "...", ...}, ...]
+      - NDJSON (по строке на объект)
+      - {"phrase_1": [...], "phrase_2":[...], ...} (ориентация columns)
+    """
+    # 1) список объектов
     try:
         obj = json.loads(raw.decode("utf-8"))
         if isinstance(obj, list):
             return pd.DataFrame(obj)
         if isinstance(obj, dict):
+            # columns-orient
             return pd.DataFrame(obj)
     except Exception:
         pass
+    # 2) NDJSON
     try:
         return pd.read_json(io.BytesIO(raw), lines=True)
     except Exception:
@@ -41,15 +54,18 @@ def _try_read_json(raw: bytes) -> pd.DataFrame:
 def read_uploaded_file_bytes(uploaded) -> Tuple[pd.DataFrame, str]:
     raw = uploaded.read()
     h = file_md5(raw)
+    # Пытаемся по расширению
     name = (uploaded.name or "").lower()
     if name.endswith(".json") or name.endswith(".ndjson"):
         df = _try_read_json(raw)
         return df, h
+    # CSV
     try:
         df = pd.read_csv(io.BytesIO(raw))
         return df, h
     except Exception:
         pass
+    # Excel
     try:
         df = pd.read_excel(io.BytesIO(raw))
         return df, h
@@ -98,20 +114,21 @@ def style_suspicious_and_low(df, sem_thresh: float, lex_thresh: float, low_score
         is_suspicious = (score >= sem_thresh and lex <= lex_thresh)
         for _ in row:
             if is_suspicious:
-                out.append('background-color: #fff2b8')
+                out.append('background-color: #fff2b8')  # жёлтый
             elif is_low_score:
-                out.append('background-color: #ffcccc')
+                out.append('background-color: #ffcccc')  # розовый
             else:
                 out.append('')
         return out
     return df.style.apply(highlight, axis=1)
 
-# ======== Простые признаки ========
+# ======== Простые признаки для аналитики (без тяжёлых зависимостей) ========
+
 NEG_PAT = re.compile(r"\bне\b|\bни\b|\bнет\b", flags=re.IGNORECASE)
 NUM_PAT = re.compile(r"\b\d+\b")
 DATE_PAT = re.compile(r"\b\d{1,2}[./-]\d{1,2}([./-]\d{2,4})?\b")
 
-def simple_flags(text: str) -> Dict[str, Any]:
+def simple_flags(text: str) -> Dict[str, bool]:
     t = text or ""
     return {
         "has_neg": bool(NEG_PAT.search(t)),
@@ -121,13 +138,15 @@ def simple_flags(text: str) -> Dict[str, Any]:
         "len_tok": len([x for x in t.split() if x]),
     }
 
+# Морфология (опционально)
 try:
-    import pymorphy2
+    import pymorphy2   # type: ignore
     _MORPH = pymorphy2.MorphAnalyzer()
 except Exception:
     _MORPH = None
 
 def pos_first_token(text: str) -> str:
+    """Очень лёгкая POS-метка по первому токену (если pymorphy2 доступен)."""
     if _MORPH is None:
         return "NA"
     toks = [t for t in text.split() if t]
@@ -136,8 +155,9 @@ def pos_first_token(text: str) -> str:
     p = _MORPH.parse(toks[0])[0]
     return str(p.tag.POS) if p and p.tag and p.tag.POS else "NA"
 
-# ======== Бутстрэп CI ========
+# ======== Бутстрэп CI для A/B ========
 def bootstrap_diff_ci(a: np.ndarray, b: np.ndarray, n_boot: int = 500, seed: int = 42, ci: float = 0.95):
+    """Возвращает (mean_diff, low, high)."""
     rng = np.random.default_rng(seed)
     diffs = []
     n = min(len(a), len(b))
@@ -155,6 +175,7 @@ def bootstrap_diff_ci(a: np.ndarray, b: np.ndarray, n_boot: int = 500, seed: int
     return mean_diff, low, high
 
 # ============== Загрузка модели ==============
+
 def download_file_from_gdrive(file_id: str) -> str:
     import gdown
     tmp_dir = tempfile.gettempdir()
@@ -179,7 +200,6 @@ def download_file_from_gdrive(file_id: str) -> str:
             pass
     return model_dir
 
-@st.cache_resource(show_spinner=False)
 def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
     if source == "huggingface":
         model_path = identifier
