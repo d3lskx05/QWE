@@ -1,5 +1,6 @@
 # utils.py
 
+import streamlit as st
 import pandas as pd
 import numpy as np
 import io
@@ -200,6 +201,7 @@ def download_file_from_gdrive(file_id: str) -> str:
             pass
     return model_dir
 
+@st.cache_resource(show_spinner=False)
 def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
     if source == "huggingface":
         model_path = identifier
