@@ -626,6 +626,30 @@ if mode == "Работа с текстовыми моделями":
 # ===================== РЕЖИМ: МУЛЬТИМОДАЛЬНЫЕ МОДЕЛИ =====================
 elif mode == "Работа с мультимодальными моделями":
     st.header("🖼️ Мультимодальные сценарии")
+# --- Настройка загрузки мультимодели ---
+    st.sidebar.header("Настройки мультимодальной модели")
+    mm_kind = st.sidebar.selectbox("Тип мультимодели", ["BLIP (captioning)", "CLIP (image↔text)"], index=0)
+
+    # Источник + ID для первой модели
+    mm_source_1 = st.sidebar.selectbox("Источник модели 1", ["huggingface", "google_drive"], key="mm_src1")
+    mm_id_1 = st.sidebar.text_input(
+        "ID/путь модели 1 (HF repo id или GDrive file id)",
+        value="Salesforce/blip-image-captioning-base" if mm_kind.startswith("BLIP") else "openai/clip-vit-base-patch32",
+        key="mm_id1"
+    )
+
+    # Флажок сравнения
+    mm_compare = st.sidebar.checkbox("Сравнить две мультимодели (A/B)")
+    mm_source_2, mm_id_2 = None, None
+    if mm_compare:
+        mm_source_2 = st.sidebar.selectbox("Источник модели 2", ["huggingface", "google_drive"], key="mm_src2")
+        mm_id_2 = st.sidebar.text_input(
+            "ID/путь модели 2",
+            value="Salesforce/blip-image-captioning-large" if mm_kind.startswith("BLIP") else "openai/clip-vit-base-patch32",
+            key="mm_id2"
+        )
+
+    load_models_btn = st.sidebar.button("Загрузить мультимодель(и)")
 
     # Простая история для мультимодала
     if "mm_history" not in st.session_state:
