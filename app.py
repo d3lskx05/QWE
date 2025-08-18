@@ -649,7 +649,21 @@ elif mode == "Работа с мультимодальными моделями"
             key="mm_id2"
         )
 
-    load_models_btn = st.sidebar.button("Загрузить мультимодель(и)")
+    mm1, proc1, mm2, proc2 = None, None, None, None
+    if load_models_btn:
+        try:
+            import multimodal as mm
+            if mm_kind.startswith("BLIP"):
+                mm1, proc1 = mm.load_blip_model_custom(mm_source_1, mm_id_1)
+                if mm_compare and mm_id_2:
+                    mm2, proc2 = mm.load_blip_model_custom(mm_source_2, mm_id_2)
+            else:  # CLIP
+                mm1, proc1 = mm.load_clip_model_custom(mm_source_1, mm_id_1)
+                if mm_compare and mm_id_2:
+                    mm2, proc2 = mm.load_clip_model_custom(mm_source_2, mm_id_2)
+            st.sidebar.success("Модель(и) загружены")
+        except Exception as e:
+            st.sidebar.error(f"Ошибка при загрузке: {e}")
 
     # Простая история для мультимодала
     if "mm_history" not in st.session_state:
