@@ -640,25 +640,22 @@ elif mode == "Работа с мультимодальными моделями"
     if st.sidebar.button("Очистить историю мультимодала"):
         st.session_state["mm_history"] = []
     if st.session_state["mm_history"]:
-        import copy
+        import json
 
-        def make_json_safe(obj):
-            """Преобразует объект в сериализуемый вид"""
-            if isinstance(obj, (str, int, float, bool)) or obj is None:
-                return obj
-            if isinstance(obj, dict):
-                return {k: make_json_safe(v) for k, v in obj.items()}
-            if isinstance(obj, list):
-                return [make_json_safe(v) for v in obj]
-            return str(obj)  # всё остальное → строка
+        def safe_json_dumps(obj) -> str:
+            """Универсальная сериализация: всё, что не json-совместимо → str"""
+            def convert(o):
+                if isinstance(o, (str, int, float, bool)) or o is None:
+                    return o
+                if isinstance(o, dict):
+                    return {k: convert(v) for k, v in o.items()}
+                if isinstance(o, (list, tuple, set)):
+                    return [convert(v) for v in o]
+                return str(o)
 
-        safe_history = make_json_safe(copy.deepcopy(st.session_state["mm_history"]))
+            return json.dumps(convert(obj), indent=2, ensure_ascii=False)
 
-        mm_bytes = json.dumps(
-            safe_history,
-            indent=2,
-            ensure_ascii=False
-        ).encode("utf-8")
+        mm_bytes = safe_json_dumps(st.session_state["mm_history"]).encode("utf-8")
 
         st.sidebar.download_button(
             "Скачать историю (JSON)",
