@@ -640,12 +640,11 @@ elif mode == "Работа с мультимодальными моделями"
     if st.sidebar.button("Очистить историю мультимодала"):
         st.session_state["mm_history"] = []
     if st.session_state["mm_history"]:
-    # делаем копию и приводим всё к строкам
     safe_history = copy.deepcopy(st.session_state["mm_history"])
     for rec in safe_history:
         for k, v in rec.items():
             try:
-                json.dumps(v)
+                json.dumps(v)  # проверяем, сериализуемо ли значение
             except TypeError:
                 rec[k] = str(v)
 
