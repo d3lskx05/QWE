@@ -650,7 +650,7 @@ elif mode == "Работа с мультимодальными моделями"
         )
 
     mm1, proc1, mm2, proc2 = None, None, None, None
-    if load_models_btn:
+    load_models_btn:
         try:
             import multimodal as mm
             if mm_kind.startswith("BLIP"):
