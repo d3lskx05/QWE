@@ -625,9 +625,9 @@ if mode == "Работа с текстовыми моделями":
 
 # ===================== РЕЖИМ: МУЛЬТИМОДАЛЬНЫЕ МОДЕЛИ =====================
 elif mode == "Работа с мультимодальными моделями":
-    st.header("🖼️ Мультимодальные сценарии")
+    st.header("🖼️ Мультимодальная аналитика — лёгкая и точная")
 
-    # ===================== История мультимодала =====================
+    # ===================== История =====================
     if "mm_history" not in st.session_state:
         st.session_state["mm_history"] = []
 
@@ -636,65 +636,32 @@ elif mode == "Работа с мультимодальными моделями"
         if len(st.session_state["mm_history"]) > 300:
             st.session_state["mm_history"] = st.session_state["mm_history"][-300:]
 
-    st.sidebar.header("История (мультимодальные)")
-    if st.sidebar.button("Очистить историю мультимодала"):
-        st.session_state["mm_history"] = []
-    if st.session_state["mm_history"]:
-        import json
-
-        def safe_json_dumps(obj) -> str:
-            """Универсальная сериализация: всё, что не json-совместимо → str"""
-            def convert(o):
-                if isinstance(o, (str, int, float, bool)) or o is None:
-                    return o
-                if isinstance(o, dict):
-                    return {k: convert(v) for k, v in o.items()}
-                if isinstance(o, (list, tuple, set)):
-                    return [convert(v) for v in o]
-                return str(o)
-
-            return json.dumps(convert(obj), indent=2, ensure_ascii=False)
-
-        mm_bytes = safe_json_dumps(st.session_state["mm_history"]).encode("utf-8")
-
-        st.sidebar.download_button(
-            "Скачать историю (JSON)",
-            data=mm_bytes,
-            file_name="mm_history.json",
-            mime="application/json"
-        )
-    else:
-        st.sidebar.caption("История мультимодала пуста")
-
-    # ===================== Выбор моделей =====================
     st.sidebar.header("Настройки мультимодальных моделей")
 
-    # CLIP (A)
+    # ===================== Выбор и загрузка моделей =====================
     clip_source = st.sidebar.selectbox("Источник CLIP (A)", ["huggingface", "google_drive"], index=0, key="clip_source_a")
     clip_id = st.sidebar.text_input("CLIP (A) Model ID / GDrive File ID", value="openai/clip-vit-base-patch32", key="clip_id_a")
 
-    # BLIP
-    blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0, key="blip_source")
-    blip_id = st.sidebar.text_input("BLIP Model ID / GDrive File ID", value="Salesforce/blip-image-captioning-base", key="blip_id")
-
-    # A/B тест для CLIP
-    enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая CLIP модель (B)", value=False)
+    enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая CLIP (B)", value=False)
     if enable_mm_ab:
         clip_source_b = st.sidebar.selectbox("Источник CLIP (B)", ["huggingface", "google_drive"], index=0, key="clip_source_b")
         clip_id_b = st.sidebar.text_input("CLIP (B) Model ID / GDrive File ID", value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K", key="clip_id_b")
     else:
         clip_source_b, clip_id_b = None, None
 
-    from multimodal import load_blip_model, load_clip_model, check_text_image_pair, generate_caption
+    blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0, key="blip_source")
+    blip_id = st.sidebar.text_input("BLIP Model ID / GDrive File ID", value="Salesforce/blip-image-captioning-base", key="blip_id")
+
+    from multimodal import load_blip_model, load_clip_model, generate_caption
     from utils import bootstrap_diff_ci
     from PIL import Image
     import pandas as pd
     import numpy as np
-    import json
     import torch
     import io, zipfile
     import altair as alt
 
+    # Загрузка моделей (ошибки прерывают выполнение блока)
     try:
         with st.spinner("Загружаю CLIP (A)..."):
             clip_model_a, clip_proc_a = load_clip_model(clip_source, clip_id)
@@ -721,202 +688,118 @@ elif mode == "Работа с мультимодальными моделями"
         st.sidebar.error(f"Ошибка загрузки BLIP: {e}")
         st.stop()
 
-    # ===================== BLIP Caption =====================
-    with st.expander("🖼️ Генерация описания картинки (BLIP)"):
-        st.markdown("Загрузите изображение, и BLIP предложит текстовое описание.")
+    # ===================== Лёгкие метрики для Captioning =====================
+    # (не требуются тяжёлые зависимости; пригодны для бесплатного деплоя)
+    def _ngrams(tokens: list, n: int) -> set:
+        return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
 
-        uploaded_blip = st.file_uploader("Загрузите картинку для подписи", type=["jpg","jpeg","png"], key="blip_img")
+    def bleu_n(ref: str, hyp: str, n: int = 4) -> float:
+        ref_t = ref.lower().split(); hyp_t = hyp.lower().split()
+        if not hyp_t:
+            return 0.0
+        score = 0.0
+        for k in range(1, n+1):
+            ref_ngr = _ngrams(ref_t, k)
+            hyp_ngr = _ngrams(hyp_t, k)
+            inter = len(ref_ngr & hyp_ngr)
+            total = max(len(hyp_ngr), 1)
+            score += inter / total
+        return score / n
 
-        if uploaded_blip:
-            img = Image.open(uploaded_blip).convert("RGB")
-            st.image(img, caption="Загруженное изображение", use_column_width=True)
+    def rouge_l(ref: str, hyp: str) -> float:
+        ref_t = ref.lower().split(); hyp_t = hyp.lower().split()
+        dp = [[0]*(len(hyp_t)+1) for _ in range(len(ref_t)+1)]
+        for i in range(1, len(ref_t)+1):
+            for j in range(1, len(hyp_t)+1):
+                if ref_t[i-1] == hyp_t[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        lcs = dp[-1][-1]
+        return lcs / max(len(ref_t), 1)
 
-            if st.button("Сгенерировать описание", key="blip_caption_btn"):
-                with st.spinner("Генерация описания..."):
-                    caption = generate_caption(blip_model_u, blip_proc_u, img)
-                st.success(f"BLIP Caption: **{caption}**")
-                add_mm_history({
-                    "type": "blip_caption",
-                    "filename": getattr(uploaded_blip, "name", ""),
-                    "caption": caption,
-                    "timestamp": pd.Timestamp.now().isoformat()
-                })
+    def light_cider(refs: list, hyps: list, n_max: int = 4) -> float:
+        # Суррогат CIDEr: усредняем пересечение n-грамм 1..n_max
+        scores = []
+        for r, h in zip(refs, hyps):
+            r_t = r.lower().split(); h_t = h.lower().split()
+            if not h_t:
+                scores.append(0.0); continue
+            s = 0.0
+            for n in range(1, n_max+1):
+                r_ngr = _ngrams(r_t, n); h_ngr = _ngrams(h_t, n)
+                s += len(r_ngr & h_ngr) / max(len(h_ngr), 1)
+            scores.append(s / n_max)
+        return float(np.mean(scores)) if scores else 0.0
 
-    # ===================== CLIP + BLIP сравнение =====================
-    with st.expander("🤝 Сценарий: сравнение текста и BLIP-описания"):
-        st.markdown("Загрузите картинку, получите описание через BLIP и сравните его с вашим текстом при помощи CLIP.")
+    def light_spice(refs: list, hyps: list) -> float:
+        # Суррогат SPICE: пересечение множеств уникальных лемм/слов
+        # (без сцен-графа; быстрый индикатор семантического перекрытия)
+        scores = []
+        for r, h in zip(refs, hyps):
+            r_set = set(r.lower().split()); h_set = set(h.lower().split())
+            scores.append(len(r_set & h_set) / max(len(h_set), 1))
+        return float(np.mean(scores)) if scores else 0.0
 
-        uploaded_joint = st.file_uploader("Загрузите картинку", type=["jpg","jpeg","png"], key="joint_img")
-        user_text = st.text_input("Введите свой текст для сравнения", key="joint_text")
-
-        if uploaded_joint:
-            img = Image.open(uploaded_joint).convert("RGB")
-            st.image(img, caption="Загруженное изображение", use_column_width=True)
-
-            if st.button("Сравнить текст и BLIP-описание", key="joint_btn"):
-                with st.spinner("Генерация описания BLIP..."):
-                    blip_caption = generate_caption(blip_model_u, blip_proc_u, img)
-
-                with st.spinner("Сравнение через CLIP..."):
-                    score_user = check_text_image_pair(clip_model_a, clip_proc_a, user_text, img) if user_text else None
-                    score_blip = check_text_image_pair(clip_model_a, clip_proc_a, blip_caption, img)
-
-                st.subheader("Результаты")
-                st.markdown(f"**BLIP Caption:** {blip_caption}")
-                st.metric("CLIP score (BLIP caption ↔ image)", f"{score_blip:.4f}")
-
-                rec = {
-                    "type": "clip_compare",
-                    "filename": getattr(uploaded_joint, "name", ""),
-                    "blip_caption": blip_caption,
-                    "score_blip": float(score_blip),
-                    "user_text": user_text if user_text else None,
-                    "score_user": float(score_user) if score_user is not None else None,
-                    "timestamp": pd.Timestamp.now().isoformat(),
-                    "clip_model_a": clip_id,
-                    "blip_model": blip_id
-                }
-
-                if score_user is not None:
-                    delta = score_user - score_blip
-                    st.metric("CLIP score (ваш текст ↔ image)", f"{score_user:.4f}", delta=f"{delta:+.4f}")
-                    if score_user > score_blip:
-                        st.success("✅ Ваш текст лучше соответствует картинке, чем автогенерация BLIP!")
-                    else:
-                        st.info("ℹ️ BLIP-описание оказалось ближе к картинке, чем ваш текст.")
-
-                add_mm_history(rec)
-
-    # ===================== Пакетный анализ: CLIP Retrieval =====================
-    def _recall_at_k(sim_matrix: np.ndarray, k: int) -> float:
-        n = sim_matrix.shape[0]
-        ranks = np.argsort(-sim_matrix, axis=1)
-        hits = sum([1 if i in ranks[i, :k] else 0 for i in range(n)])
-        return hits / max(n, 1)
+    # ===================== Retrieval метрики =====================
+    from sklearn.metrics import average_precision_score
 
     def _cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
         b = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
         return a @ b.T
 
-    with st.expander("📦 Пакетный анализ: CLIP Retrieval (text↔image)"):
-        st.markdown("Загрузите CSV (`text,image`) и ZIP с файлами изображений. Для каждой строки CSV `image` должен совпадать с именем файла в ZIP.")
+    def recall_at_k(sim_matrix: np.ndarray, k: int) -> float:
+        n = sim_matrix.shape[0]
+        ranks = np.argsort(-sim_matrix, axis=1)
+        hits = sum(1 if i in ranks[i, :k] else 0 for i in range(n))
+        return hits / max(n, 1)
 
-        csv_file = st.file_uploader("CSV с парами (text,image)", type=["csv"], key="mm_clip_csv")
-        zip_file = st.file_uploader("ZIP с изображениями", type=["zip"], key="mm_clip_zip")
+    def mean_average_precision(sim_matrix: np.ndarray) -> float:
+        n = sim_matrix.shape[0]
+        y = np.eye(n)
+        aps = []
+        for i in range(n):
+            aps.append(average_precision_score(y[i], sim_matrix[i]))
+        return float(np.mean(aps)) if aps else 0.0
 
-        if csv_file and zip_file:
-            df_pairs = pd.read_csv(csv_file)
-            if not {"text", "image"}.issubset(df_pairs.columns):
-                st.error("CSV должен содержать колонки: text, image")
+    def ndcg_at_k(sim_matrix: np.ndarray, k: int = 10) -> float:
+        n = sim_matrix.shape[0]
+        vals = []
+        for i in range(n):
+            idx = np.argsort(-sim_matrix[i])[:k]
+            gains = [1.0 if j == i else 0.0 for j in idx]
+            discounts = [1/np.log2(r+2) for r in range(len(gains))]
+            dcg = float(np.sum(np.array(gains) * np.array(discounts)))
+            idcg = 1.0  # максимум при правильном эл-те на первом месте
+            vals.append(dcg / idcg)
+        return float(np.mean(vals)) if vals else 0.0
+
+    def bootstrap_metric_diff(rows: int, metric_fn, sim_a: np.ndarray, sim_b: np.ndarray, iters: int = 200, k: int = None) -> tuple:
+        # Бутстрэп разницы метрик (B−A) по строкам сим-матрицы
+        diffs = []
+        rng = np.random.default_rng(42)
+        for _ in range(iters):
+            idx = rng.integers(0, rows, size=rows)
+            sa = sim_a[idx][:, idx]
+            sb = sim_b[idx][:, idx]
+            if metric_fn is recall_at_k:
+                assert k is not None
+                diffs.append(metric_fn(sb, k) - metric_fn(sa, k))
+            elif metric_fn is ndcg_at_k:
+                assert k is not None
+                diffs.append(metric_fn(sb, k) - metric_fn(sa, k))
             else:
-                zbytes = io.BytesIO(zip_file.read())
-                with zipfile.ZipFile(zbytes) as zf:
-                    names = set(zf.namelist())
+                diffs.append(metric_fn(sb) - metric_fn(sa))
+        diffs = np.array(diffs)
+        return float(np.mean(diffs)), float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))
 
-                    imgs, ok_rows = [], []
-                    for idx, row in df_pairs.iterrows():
-                        fname = str(row["image"])
-                        if fname in names:
-                            with zf.open(fname) as f:
-                                img = Image.open(io.BytesIO(f.read())).convert("RGB")
-                            imgs.append(img)
-                            ok_rows.append(idx)
-                        else:
-                            st.warning(f"Нет файла в ZIP: {fname}")
-
-                    if imgs:
-                        df_eval = df_pairs.loc[ok_rows].reset_index(drop=True)
-                        texts = df_eval["text"].astype(str).tolist()
-
-                        with st.spinner("Кодирую тексты (CLIP A)..."):
-                            inputs_t = clip_proc_a(text=texts, return_tensors="pt", padding=True, truncation=True)
-                            with torch.no_grad():
-                                t_emb_a = clip_model_a.get_text_features(**inputs_t).cpu().numpy()
-
-                        with st.spinner("Кодирую изображения (CLIP A)..."):
-                            inputs_i = clip_proc_a(images=imgs, return_tensors="pt")
-                            with torch.no_grad():
-                                i_emb_a = clip_model_a.get_image_features(**inputs_i).cpu().numpy()
-
-                        sim_a = _cosine_sim(t_emb_a, i_emb_a)
-
-                        r1 = _recall_at_k(sim_a, 1)
-                        r5 = _recall_at_k(sim_a, 5) if sim_a.shape[1] >= 5 else np.nan
-                        r10 = _recall_at_k(sim_a, 10) if sim_a.shape[1] >= 10 else np.nan
-
-                        st.subheader("Метрики (CLIP A)")
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("Recall@1", f"{r1:.3f}")
-                        c2.metric("Recall@5", f"{r5:.3f}" if not np.isnan(r5) else "—")
-                        c3.metric("Recall@10", f"{r10:.3f}" if not np.isnan(r10) else "—")
-
-                        best_scores = sim_a.max(axis=1)
-                        chart = alt.Chart(pd.DataFrame({"best_score": best_scores})).mark_bar().encode(
-                            alt.X("best_score:Q", bin=alt.Bin(maxbins=30), title="Лучший score по строке (text→image)"),
-                            y='count()', tooltip=['count()']
-                        ).interactive()
-                        st.altair_chart(chart, use_container_width=True)
-
-                        # A/B сравнение
-                        if clip_model_b is not None:
-                            with st.spinner("Кодирую тексты (CLIP B)..."):
-                                inputs_t_b = clip_proc_b(text=texts, return_tensors="pt", padding=True, truncation=True)
-                                with torch.no_grad():
-                                    t_emb_b = clip_model_b.get_text_features(**inputs_t_b).cpu().numpy()
-                            with st.spinner("Кодирую изображения (CLIP B)..."):
-                                inputs_i_b = clip_proc_b(images=imgs, return_tensors="pt")
-                                with torch.no_grad():
-                                    i_emb_b = clip_model_b.get_image_features(**inputs_i_b).cpu().numpy()
-                            sim_b = _cosine_sim(t_emb_b, i_emb_b)
-
-                            r1_b = _recall_at_k(sim_b, 1)
-                            r5_b = _recall_at_k(sim_b, 5) if sim_b.shape[1] >= 5 else np.nan
-                            r10_b = _recall_at_k(sim_b, 10) if sim_b.shape[1] >= 10 else np.nan
-
-                            st.subheader("A/B сравнение (B против A)")
-                            d1, d2, d3 = st.columns(3)
-                            d1.metric("Δ Recall@1", f"{(r1_b - r1):+.3f}")
-                            d2.metric("Δ Recall@5", f"{(r5_b - r5):+.3f}" if not (np.isnan(r5) or np.isnan(r5_b)) else "—")
-                            d3.metric("Δ Recall@10", f"{(r10_b - r10):+.3f}" if not (np.isnan(r10) or np.isnan(r10_b)) else "—")
-
-                            mean_diff, low, high = bootstrap_diff_ci(sim_b.max(axis=1), sim_a.max(axis=1), n_boot=500)
-                            st.caption(f"Бутстрэп ДИ (95%) для Δ best_score (B−A): [{low:+.4f}, {high:+.4f}], средняя: {mean_diff:+.4f}")
-
-    # ===================== Анализ BLIP Caption (BLEU / ROUGE) =====================
-    def _ngrams(tokens: list, n: int) -> set:
-        return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
-
-    def _bleu(ref: str, hyp: str, n: int = 4) -> float:
-        ref_tokens = ref.lower().split()
-        hyp_tokens = hyp.lower().split()
-        score = 0.0
-        for i in range(1, n+1):
-            ref_ngr = _ngrams(ref_tokens, i)
-            hyp_ngr = _ngrams(hyp_tokens, i)
-            inter = len(ref_ngr & hyp_ngr)
-            total = max(len(hyp_ngr), 1)
-            score += inter / total
-        return score / n
-
-    def _rouge_l(ref: str, hyp: str) -> float:
-        ref_tokens = ref.lower().split()
-        hyp_tokens = hyp.lower().split()
-        dp = [[0]*(len(hyp_tokens)+1) for _ in range(len(ref_tokens)+1)]
-        for i in range(1, len(ref_tokens)+1):
-            for j in range(1, len(hyp_tokens)+1):
-                if ref_tokens[i-1] == hyp_tokens[j-1]:
-                    dp[i][j] = dp[i-1][j-1] + 1
-                else:
-                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
-        lcs = dp[-1][-1]
-        return lcs / max(len(ref_tokens), 1)
-
-    with st.expander("📊 Анализ BLIP Caption против эталонных описаний"):
-        st.markdown("Загрузите CSV с колонками: `image`, `reference_caption`. ZIP с изображениями обязателен. BLIP сгенерирует подписи, а затем сравнит с эталонными BLEU и ROUGE-L.")
-
-        csv_blip = st.file_uploader("CSV (image, reference_caption)", type=["csv"], key="blip_eval_csv")
+    # ===================== 1) BLIP Caption Evaluation =====================
+    with st.expander("📊 Оценка BLIP Caption по лёгким метрикам"):
+        st.caption("Лёгкие метрики для бесплатного деплоя: BLEU, ROUGE-L, Light-CIDEr, Light-SPICE. Опционально — BERTScore (медленно).")
+        csv_blip = st.file_uploader("CSV с эталонами: image, reference_caption", type=["csv"], key="blip_eval_csv")
         zip_blip = st.file_uploader("ZIP с изображениями", type=["zip"], key="blip_eval_zip")
+        use_bertscore = st.checkbox("Включить BERTScore (bert-base-uncased) — медленно", value=False)
 
         if csv_blip and zip_blip:
             df_ref = pd.read_csv(csv_blip)
@@ -926,57 +809,146 @@ elif mode == "Работа с мультимодальными моделями"
                 zbytes = io.BytesIO(zip_blip.read())
                 with zipfile.ZipFile(zbytes) as zf:
                     names = set(zf.namelist())
-                    refs, hyps, bleus, rouges = [], [], [], []
-
-                    for idx, row in df_ref.iterrows():
-                        fname = str(row["image"])
-                        ref_caption = str(row["reference_caption"])
+                    refs, hyps, kept_images = [], [], []
+                    for _, row in df_ref.iterrows():
+                        fname = str(row["image"]); ref = str(row["reference_caption"])
                         if fname not in names:
                             st.warning(f"Нет файла в ZIP: {fname}")
                             continue
                         with zf.open(fname) as f:
                             img = Image.open(io.BytesIO(f.read())).convert("RGB")
+                        hyp = generate_caption(blip_model_u, blip_proc_u, img)
+                        refs.append(ref); hyps.append(hyp); kept_images.append(fname)
 
+                if refs:
+                    # Лёгкие метрики
+                    bleu = float(np.mean([bleu_n(r,h) for r,h in zip(refs,hyps)]))
+                    rouge = float(np.mean([rouge_l(r,h) for r,h in zip(refs,hyps)]))
+                    cider_val = light_cider(refs, hyps)
+                    spice_val = light_spice(refs, hyps)
+
+                    c1,c2,c3,c4 = st.columns(4)
+                    c1.metric("BLEU (avg)", f"{bleu:.3f}")
+                    c2.metric("ROUGE-L (avg)", f"{rouge:.3f}")
+                    c3.metric("Light-CIDEr", f"{cider_val:.3f}")
+                    c4.metric("Light-SPICE", f"{spice_val:.3f}")
+
+                    # BERTScore (опционально)
+                    if use_bertscore:
+                        try:
+                            from bert_score import score as bert_score
+                            with st.spinner("Считаю BERTScore (это может занять время)..."):
+                                P, R, F1 = bert_score(hyps, refs, lang="en", model_type="bert-base-uncased", rescale_with_baseline=True)
+                            st.metric("BERTScore F1", f"{F1.mean().item():.3f}")
+                        except Exception as e:
+                            st.warning(f"Не удалось посчитать BERTScore: {e}")
+
+                    df_eval = pd.DataFrame({"image": kept_images, "reference": refs, "hypothesis": hyps})
+                    st.dataframe(df_eval, use_container_width=True)
+
+                    csv_out = df_eval.to_csv(index=False).encode("utf-8")
+                    st.download_button("Скачать результаты (CSV)", data=csv_out, file_name="blip_eval_results.csv", mime="text/csv")
+
+    # ===================== 2) CLIP Retrieval (Text→Image) =====================
+    with st.expander("📦 CLIP Retrieval (text↔image): Recall@K, mAP, nDCG"):
+        st.caption("Лёгкие и стандартные метрики retrieval. A/B тест — по этим метрикам с бутстрэпом.")
+        csv_file = st.file_uploader("CSV (text,image)", type=["csv"], key="mm_clip_csv")
+        zip_file = st.file_uploader("ZIP с изображениями", type=["zip"], key="mm_clip_zip")
+        n_boot = st.slider("Бутстрэп итераций (для A/B)", 100, 800, 300, 50)
+
+        if csv_file and zip_file:
+            df_pairs = pd.read_csv(csv_file)
+            if not {"text", "image"}.issubset(df_pairs.columns):
+                st.error("CSV должен содержать колонки: text, image")
+            else:
+                zbytes = io.BytesIO(zip_file.read())
+                with zipfile.ZipFile(zbytes) as zf:
+                    names = set(zf.namelist())
+                    imgs, texts, kept_idx = [], [], []
+                    for i, row in df_pairs.iterrows():
+                        fname = str(row["image"]); text = str(row["text"])
+                        if fname not in names:
+                            st.warning(f"Нет файла в ZIP: {fname}")
+                            continue
+                        with zf.open(fname) as f:
+                            imgs.append(Image.open(io.BytesIO(f.read())).convert("RGB"))
+                        texts.append(text); kept_idx.append(i)
+
+                if imgs:
+                    with st.spinner("Кодирую тексты/изображения (CLIP A)..."):
+                        inputs_t = clip_proc_a(text=texts, return_tensors="pt", padding=True, truncation=True)
                         with torch.no_grad():
-                            hyp_caption = generate_caption(blip_model_u, blip_proc_u, img)
+                            t_emb_a = clip_model_a.get_text_features(**inputs_t).cpu().numpy()
+                        inputs_i = clip_proc_a(images=imgs, return_tensors="pt")
+                        with torch.no_grad():
+                            i_emb_a = clip_model_a.get_image_features(**inputs_i).cpu().numpy()
+                    sim_a = _cosine_sim(t_emb_a, i_emb_a)
 
-                        bleu_score = _bleu(ref_caption, hyp_caption)
-                        rouge_score = _rouge_l(ref_caption, hyp_caption)
+                    r1 = recall_at_k(sim_a, 1)
+                    r5 = recall_at_k(sim_a, 5) if sim_a.shape[1] >= 5 else np.nan
+                    r10 = recall_at_k(sim_a, 10) if sim_a.shape[1] >= 10 else np.nan
+                    map_score = mean_average_precision(sim_a)
+                    ndcg10 = ndcg_at_k(sim_a, 10 if sim_a.shape[1] >= 10 else max(1, sim_a.shape[1]))
 
-                        refs.append(ref_caption)
-                        hyps.append(hyp_caption)
-                        bleus.append(bleu_score)
-                        rouges.append(rouge_score)
+                    c1,c2,c3,c4,c5 = st.columns(5)
+                    c1.metric("R@1", f"{r1:.3f}")
+                    c2.metric("R@5", f"{r5:.3f}" if not np.isnan(r5) else "—")
+                    c3.metric("R@10", f"{r10:.3f}" if not np.isnan(r10) else "—")
+                    c4.metric("mAP", f"{map_score:.3f}")
+                    c5.metric("nDCG@10", f"{ndcg10:.3f}")
 
-                    if bleus:
-                        df_eval = pd.DataFrame({
-                            "image": df_ref["image"].iloc[:len(bleus)],
-                            "reference": refs,
-                            "hypothesis": hyps,
-                            "BLEU": bleus,
-                            "ROUGE-L": rouges
-                        })
+                    # A/B сравнение
+                    if clip_model_b is not None:
+                        with st.spinner("Кодирую тексты/изображения (CLIP B)..."):
+                            inputs_t_b = clip_proc_b(text=texts, return_tensors="pt", padding=True, truncation=True)
+                            with torch.no_grad():
+                                t_emb_b = clip_model_b.get_text_features(**inputs_t_b).cpu().numpy()
+                            inputs_i_b = clip_proc_b(images=imgs, return_tensors="pt")
+                            with torch.no_grad():
+                                i_emb_b = clip_model_b.get_image_features(**inputs_i_b).cpu().numpy()
+                        sim_b = _cosine_sim(t_emb_b, i_emb_b)
 
-                        st.subheader("Результаты BLEU / ROUGE-L")
-                        st.dataframe(df_eval)
+                        r1_b = recall_at_k(sim_b, 1)
+                        r5_b = recall_at_k(sim_b, 5) if sim_b.shape[1] >= 5 else np.nan
+                        r10_b = recall_at_k(sim_b, 10) if sim_b.shape[1] >= 10 else np.nan
+                        map_b = mean_average_precision(sim_b)
+                        ndcg10_b = ndcg_at_k(sim_b, 10 if sim_b.shape[1] >= 10 else max(1, sim_b.shape[1]))
 
-                        c1, c2 = st.columns(2)
-                        c1.metric("Средний BLEU", f"{np.mean(bleus):.3f}")
-                        c2.metric("Средний ROUGE-L", f"{np.mean(rouges):.3f}")
+                        st.markdown("### A/B сравнение по метрикам")
+                        d1,d2,d3 = st.columns(3)
+                        d1.metric("Δ R@1 (B−A)", f"{(r1_b - r1):+.3f}")
+                        d2.metric("Δ mAP (B−A)", f"{(map_b - map_score):+.3f}")
+                        d3.metric("Δ nDCG@10 (B−A)", f"{(ndcg10_b - ndcg10):+.3f}")
 
-                        st.markdown("**Распределение BLEU**")
-                        chart_bleu = alt.Chart(pd.DataFrame({"BLEU": bleus})).mark_bar().encode(
-                            alt.X("BLEU:Q", bin=alt.Bin(maxbins=30)),
-                            y='count()', tooltip=['count()']
-                        ).interactive()
-                        st.altair_chart(chart_bleu, use_container_width=True)
+                        with st.expander("Доверительные интервалы (бутстрэп)"):
+                            mean_d_r1, lo_r1, hi_r1 = bootstrap_metric_diff(sim_a.shape[0], recall_at_k, sim_a, sim_b, iters=n_boot, k=1)
+                            mean_d_map, lo_map, hi_map = bootstrap_metric_diff(sim_a.shape[0], mean_average_precision, sim_a, sim_b, iters=n_boot)
+                            mean_d_ndcg, lo_ndcg, hi_ndcg = bootstrap_metric_diff(sim_a.shape[0], ndcg_at_k, sim_a, sim_b, iters=n_boot, k=10)
+                            st.write(f"ΔR@1 95% ДИ: [{lo_r1:+.3f}, {hi_r1:+.3f}] (средн.: {mean_d_r1:+.3f})")
+                            st.write(f"ΔmAP 95% ДИ: [{lo_map:+.3f}, {hi_map:+.3f}] (средн.: {mean_d_map:+.3f})")
+                            st.write(f"ΔnDCG@10 95% ДИ: [{lo_ndcg:+.3f}, {hi_ndcg:+.3f}] (средн.: {mean_d_ndcg:+.3f})")
 
-                        st.markdown("**Распределение ROUGE-L**")
-                        chart_rouge = alt.Chart(pd.DataFrame({"ROUGE-L": rouges})).mark_bar().encode(
-                            alt.X("ROUGE-L:Q", bin=alt.Bin(maxbins=30)),
-                            y='count()', tooltip=['count()']
-                        ).interactive()
-                        st.altair_chart(chart_rouge, use_container_width=True)
+                    # Логируем краткий отчёт
+                    add_mm_history({
+                        "type": "clip_retrieval",
+                        "n": int(sim_a.shape[0]),
+                        "r1": float(r1), "r5": float(r5) if not np.isnan(r5) else None, "r10": float(r10) if not np.isnan(r10) else None,
+                        "map": float(map_score), "ndcg@10": float(ndcg10),
+                        "clip_a": clip_id, "clip_b": clip_id_b if clip_model_b is not None else None,
+                        "timestamp": pd.Timestamp.now().isoformat()
+                    })
 
-                        mm_bytes_eval = df_eval.to_csv(index=False).encode("utf-8")
-                        st.download_button("Скачать результаты", data=mm_bytes_eval, file_name="blip_eval_results.csv", mime="text/csv")
+    # ===================== 3) История =====================
+    if st.session_state["mm_history"]:
+        st.sidebar.header("История (мультимодал)")
+        import json
+        def _safe(obj):
+            if isinstance(obj, (str, int, float, bool)) or obj is None:
+                return obj
+            if isinstance(obj, dict):
+                return {k: _safe(v) for k,v in obj.items()}
+            if isinstance(obj, (list, tuple, set)):
+                return [_safe(v) for v in obj]
+            return str(obj)
+        hist_bytes = json.dumps(_safe(st.session_state["mm_history"]), ensure_ascii=False, indent=2).encode("utf-8")
+        st.sidebar.download_button("Скачать историю (JSON)", data=hist_bytes, file_name="mm_history.json", mime="application/json")
