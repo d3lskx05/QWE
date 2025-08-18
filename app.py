@@ -640,28 +640,29 @@ elif mode == "Работа с мультимодальными моделями"
     if st.sidebar.button("Очистить историю мультимодала"):
         st.session_state["mm_history"] = []
     if st.session_state["mm_history"]:
-    safe_history = copy.deepcopy(st.session_state["mm_history"])
-    for rec in safe_history:
-        for k, v in rec.items():
-            try:
-                json.dumps(v)  # проверяем, сериализуемо ли значение
-            except TypeError:
-                rec[k] = str(v)
+        import copy
+        safe_history = copy.deepcopy(st.session_state["mm_history"])
+        for rec in safe_history:
+            for k, v in rec.items():
+                try:
+                    json.dumps(v)  # проверяем, сериализуемо ли значение
+                except TypeError:
+                    rec[k] = str(v)
 
-    mm_bytes = json.dumps(
-        safe_history,
-        indent=2,
-        ensure_ascii=False
-    ).encode("utf-8")
+        mm_bytes = json.dumps(
+            safe_history,
+            indent=2,
+            ensure_ascii=False
+        ).encode("utf-8")
 
-    st.sidebar.download_button(
-        "Скачать историю (JSON)",
-        data=mm_bytes,
-        file_name="mm_history.json",
-        mime="application/json"
-    )
-else:
-    st.sidebar.caption("История мультимодала пуста")
+        st.sidebar.download_button(
+            "Скачать историю (JSON)",
+            data=mm_bytes,
+            file_name="mm_history.json",
+            mime="application/json"
+        )
+    else:
+        st.sidebar.caption("История мультимодала пуста")
 
     # ===================== Выбор моделей =====================
     st.sidebar.header("Настройки мультимодальных моделей")
