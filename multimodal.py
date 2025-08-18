@@ -65,20 +65,3 @@ def generate_caption(model, processor, image: Image.Image, max_length: int = 30)
         out = model.generate(**inputs, max_length=max_length)
     caption = processor.decode(out[0], skip_special_tokens=True)
     return caption
-    def load_blip_model_custom(source: str, identifier: str):
-    from transformers import BlipProcessor, BlipForConditionalGeneration
-    if source == "huggingface":
-        return BlipForConditionalGeneration.from_pretrained(identifier), BlipProcessor.from_pretrained(identifier)
-    elif source == "google_drive":
-        from utils import download_file_from_gdrive
-        path = download_file_from_gdrive(identifier)
-        return BlipForConditionalGeneration.from_pretrained(path), BlipProcessor.from_pretrained(path)
-
-def load_clip_model_custom(source: str, identifier: str):
-    from transformers import CLIPProcessor, CLIPModel
-    if source == "huggingface":
-        return CLIPModel.from_pretrained(identifier), CLIPProcessor.from_pretrained(identifier)
-    elif source == "google_drive":
-        from utils import download_file_from_gdrive
-        path = download_file_from_gdrive(identifier)
-        return CLIPModel.from_pretrained(path), CLIPProcessor.from_pretrained(path)
