@@ -1,23 +1,36 @@
-# app.py
-
 import streamlit as st
 import altair as alt
 import pandas as pd
 import numpy as np
 import json
-from utils import *
-from utils import _MORPH
+from typing import List
+
+# импортируем ровно то, что используем
+from utils import (
+    preprocess_text,
+    parse_topics_field,
+    jaccard_tokens,
+    style_suspicious_and_low,
+    simple_flags,
+    pos_first_token,
+    load_model_from_source,
+    encode_texts_in_batches,
+    bootstrap_diff_ci,
+    _MORPH,
+)
+
+from sentence_transformers import util  # нужен для cos_sim
+
+# ===================== Константы/настройки =====================
+DEFAULT_HF = "sentence-transformers/all-MiniLM-L6-v2"
+HISTORY_MAX = 500  # лимит на длину истории, чтобы не разрасталась
 
 st.set_page_config(page_title="Synonym Checker", layout="wide")
 st.title("🔎 Synonym Checker")
 
-# --- настройки модели ---
+# ===================== Сайдбар: Модели =====================
 st.sidebar.header("Настройки модели")
 model_source = st.sidebar.selectbox("Источник модели", ["huggingface", "google_drive"], index=0)
-
-# Надёжный дефолт для HF, чтобы не падать при пустом ID
-DEFAULT_HF = "sentence-transformers/all-MiniLM-L6-v2"
-
 if model_source == "huggingface":
     model_id = st.sidebar.text_input("Hugging Face Model ID", value=DEFAULT_HF)
 else:
@@ -27,7 +40,7 @@ enable_ab_test = st.sidebar.checkbox("Включить A/B тест двух м�
 if enable_ab_test:
     ab_model_source = st.sidebar.selectbox("Источник второй модели", ["huggingface", "google_drive"], index=0, key="ab_source")
     if ab_model_source == "huggingface":
-        ab_model_id = st.sidebar.text_input("Hugging Face Model ID (B)", value="all-mpnet-base-v2", key="ab_id")
+        ab_model_id = st.sidebar.text_input("Hugging Face Model ID (B)", value="sentence-transformers/all-mpnet-base-v2", key="ab_id")
     else:
         ab_model_id = st.sidebar.text_input("Google Drive File ID (B)", value="", key="ab_id")
 else:
@@ -35,14 +48,14 @@ else:
 
 batch_size = st.sidebar.number_input("Batch size для энкодинга", min_value=8, max_value=1024, value=64, step=8)
 
-# --- detector settings ---
+# ===================== Сайдбар: Детектор =====================
 st.sidebar.header("Детектор неочевидных совпадений")
 enable_detector = st.sidebar.checkbox("Включить детектор (high sem, low lex)", value=True)
 semantic_threshold = st.sidebar.slider("Порог семантической схожести (>=)", 0.0, 1.0, 0.80, 0.01)
 lexical_threshold = st.sidebar.slider("Порог лексической похожести (<=)", 0.0, 1.0, 0.30, 0.01)
 low_score_threshold = st.sidebar.slider("Порог низкой семантической схожести", 0.0, 1.0, 0.75, 0.01)
 
-# --- загрузка моделей ---
+# ===================== Загрузка моделей =====================
 try:
     with st.spinner("Загружаю основную модель..."):
         model_a = load_model_from_source(model_source, model_id)
@@ -64,7 +77,7 @@ if enable_ab_test:
             st.sidebar.error(f"Не удалось загрузить модель B: {e}")
             st.stop()
 
-# --- история ---
+# ===================== Состояния =====================
 if "history" not in st.session_state:
     st.session_state["history"] = []
 if "suggestions" not in st.session_state:
@@ -72,8 +85,13 @@ if "suggestions" not in st.session_state:
 
 def add_to_history(record: dict):
     st.session_state["history"].append(record)
+    # ограничиваем размер истории
+    if len(st.session_state["history"]) > HISTORY_MAX:
+        st.session_state["history"] = st.session_state["history"][-HISTORY_MAX:]
+
 def clear_history():
     st.session_state["history"] = []
+
 def add_suggestions(phrases: List[str]):
     s = [p for p in phrases if p and isinstance(p, str)]
     for p in reversed(s):
@@ -81,33 +99,28 @@ def add_suggestions(phrases: List[str]):
             st.session_state["suggestions"].insert(0, p)
     st.session_state["suggestions"] = st.session_state["suggestions"][:200]
 
+# ===================== История в сайдбаре =====================
 st.sidebar.header("История проверок")
 if st.sidebar.button("Очистить историю"):
     clear_history()
-if st.sidebar.button("Скачать историю в JSON"):
-    if st.session_state["history"]:
-        history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
-        st.sidebar.download_button("Скачать JSON", data=history_bytes, file_name="history.json", mime="application/json")
-    else:
-        st.sidebar.warning("История пустая")
 
-# --- Управление режимом с подтверждением (двойное нажатие на ✅) ---
+if st.session_state["history"]:
+    history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
+    st.sidebar.download_button("Скачать историю (JSON)", data=history_bytes, file_name="history.json", mime="application/json")
+else:
+    st.sidebar.caption("История пустая")
 
-# Инициализация состояний
+# ===================== Управление режимом c подтверждением =====================
 if "mode" not in st.session_state:
     st.session_state.mode = "Файл (CSV/XLSX/JSON)"
 if "pending_mode" not in st.session_state:
     st.session_state.pending_mode = None
 if "pending_confirm" not in st.session_state:
-    st.session_state.pending_confirm = False  # флаг для первого клика на ✅
-# Версия UI: инкрементим, чтобы «перемонтировать» радио и сбросить его выбор визуально
+    st.session_state.pending_confirm = False
 if "mode_ui_v" not in st.session_state:
     st.session_state.mode_ui_v = 0
 
-# Ключ радиокнопки зависит от текущего режима и версии UI
 radio_key = f"mode_selector_{st.session_state.mode}_{st.session_state.mode_ui_v}"
-
-# Радио (контролируем индексом, а не значением виджета)
 mode_choice = st.radio(
     "Режим проверки",
     ["Файл (CSV/XLSX/JSON)", "Ручной ввод"],
@@ -116,12 +129,10 @@ mode_choice = st.radio(
     key=radio_key
 )
 
-# Пользователь кликнул другой режим -> просим подтверждение
 if st.session_state.pending_mode is None and mode_choice != st.session_state.mode:
     st.session_state.pending_mode = mode_choice
-    st.session_state.pending_confirm = False  # сброс флага при новом выборе
+    st.session_state.pending_confirm = False
 
-# Полоса подтверждения
 if st.session_state.pending_mode:
     col_warn, col_yes, col_close = st.columns([4, 1, 0.6])
     with col_warn:
@@ -129,35 +140,27 @@ if st.session_state.pending_mode:
             f"Перейти в режим **{st.session_state.pending_mode}**? "
             "Текущие данные будут удалены."
         )
-
-    # Подтвердить
     with col_yes:
         if st.button("✅ Да"):
             if not st.session_state.pending_confirm:
-                # Первый клик: ставим флаг и ждем второго
                 st.session_state.pending_confirm = True
-                st.info("Подтвердить✅")
+                st.info("Нажмите ✅ ещё раз для подтверждения")
             else:
-                # Второй клик: реально меняем режим
                 st.session_state.mode = st.session_state.pending_mode
                 st.session_state.pending_mode = None
                 st.session_state.pending_confirm = False
-                # Очистка данных
                 for k in ["uploaded_file", "manual_input"]:
                     st.session_state.pop(k, None)
-                st.rerun()  # применяем новый режим
-
-    # Крестик: просто скрыть предупреждение и вернуть радио к текущему режиму
+                st.rerun()
     with col_close:
         if st.button("❌", help="Отмена"):
             st.session_state.pending_mode = None
             st.session_state.pending_confirm = False
-            st.session_state.mode_ui_v += 1  # меняем ключ -> радио перерисуется со старым режимом
+            st.session_state.mode_ui_v += 1
 
-# Текущий активный режим (далее в коде опираемся на него)
 mode = st.session_state.mode
 
-# ======= Блок: ручной ввод =======
+# ===================== Ручной ввод =====================
 def _set_manual_value(key: str, val: str):
     st.session_state[key] = val
 
@@ -296,13 +299,14 @@ if mode == "Ручной ввод":
                                 add_to_history(rec)
                                 st.success("Сохранено в истории.")
 
-# ======= Блок: файл =======
+# ===================== Блок: файл =====================
 if mode == "Файл (CSV/XLSX/JSON)":
     st.header("1. Загрузите CSV, Excel или JSON с колонками: phrase_1, phrase_2, topics (опционально)")
     uploaded_file = st.file_uploader("Выберите файл", type=["csv", "xlsx", "xls", "json", "ndjson"])
 
     if uploaded_file is not None:
         try:
+            from utils import read_uploaded_file_bytes  # локальный импорт, чтобы не утяжелять верх
             df, file_hash = read_uploaded_file_bytes(uploaded_file)
         except Exception as e:
             st.error(f"Ошибка чтения файла: {e}")
@@ -426,8 +430,11 @@ if mode == "Файл (CSV/XLSX/JSON)":
         # = Slices =
         with tabs[2]:
             st.markdown("#### Срезы качества")
+            # простые флаги
+            df["_any_neg"] = df["phrase_1_has_neg"] | df["phrase_2_has_neg"]
+            df["_any_num"] = df["phrase_1_has_num"] | df["phrase_2_has_num"]
+            df["_any_date"] = df["phrase_1_has_date"] | df["phrase_2_has_date"]
             # длина (по сумме токенов обеих фраз)
-            len_bins = st.selectbox("Биннинг по длине (сумма токенов)", ["[0,4]", "[5,9]", "[10,19]", "[20,+)"], index=1)
             def _len_bucket(r):
                 n = int(r["phrase_1_len_tok"] + r["phrase_2_len_tok"])
                 if n <= 4: return "[0,4]"
@@ -435,13 +442,6 @@ if mode == "Файл (CSV/XLSX/JSON)":
                 if n <= 19: return "[10,19]"
                 return "[20,+)"
             df["_len_bucket"] = df.apply(_len_bucket, axis=1)
-
-            # темы
-            topic_mode = st.checkbox("Агрегация по topics", value=("topics_list" in df.columns))
-            # простые флаги
-            df["_any_neg"] = df["phrase_1_has_neg"] | df["phrase_2_has_neg"]
-            df["_any_num"] = df["phrase_1_has_num"] | df["phrase_2_has_num"]
-            df["_any_date"] = df["phrase_1_has_date"] | df["phrase_2_has_date"]
 
             cols1 = st.columns(3)
             with cols1[0]:
@@ -463,9 +463,9 @@ if mode == "Файл (CSV/XLSX/JSON)":
                     pos_agg = df.groupby("phrase_1_pos1")["score"].agg(["count","mean"]).reset_index().rename(columns={"phrase_1_pos1":"POS"})
                     st.dataframe(pos_agg.sort_values("count", ascending=False), use_container_width=True)
 
+            topic_mode = st.checkbox("Агрегация по topics", value=("topics_list" in df.columns))
             if topic_mode:
                 st.markdown("**По темам (topics)**")
-                # раскрываем список тем в строки
                 exploded = df.explode("topics_list")
                 exploded["topics_list"] = exploded["topics_list"].fillna("")
                 exploded = exploded[exploded["topics_list"].astype(str)!=""]
@@ -497,7 +497,6 @@ if mode == "Файл (CSV/XLSX/JSON)":
                 ).interactive()
                 st.altair_chart(ab_chart, use_container_width=True)
 
-                # Срезы, где B лучше A и наоборот
                 delta_df = df.copy()
                 delta_df["delta"] = delta_df["score_b"] - delta_df["score"]
                 st.markdown("**Топ, где B ≫ A**")
@@ -535,7 +534,7 @@ if mode == "Файл (CSV/XLSX/JSON)":
             rep_bytes = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
             st.download_button("💾 Скачать отчёт JSON", data=rep_bytes, file_name="synonym_checker_report.json", mime="application/json")
 
-        # --- Выгрузка таблицы результатов + подсветка
+        # --- Выгрузка + подсветка
         st.subheader("3. Результаты и выгрузка")
         result_csv = df.to_csv(index=False).encode('utf-8')
         st.download_button("⬇️ Скачать результаты CSV", data=result_csv, file_name="results.csv", mime="text/csv")
@@ -571,10 +570,10 @@ if mode == "Файл (CSV/XLSX/JSON)":
     else:
         st.info("Загрузите файл для начала проверки.")
 
-# --- История внизу ---
+# ===================== История внизу =====================
 if st.session_state["history"]:
     st.header("История проверок")
-    for idx, rec in enumerate(reversed(st.session_state["history"])):  # последние сверху
+    for idx, rec in enumerate(reversed(st.session_state["history"])):
         st.markdown(f"### Проверка #{len(st.session_state['history']) - idx}")
         if rec.get("source") == "manual_single":
             p = rec.get("pair", {})
