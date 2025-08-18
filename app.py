@@ -639,9 +639,9 @@ elif mode == "Работа с мультимодальными моделями"
     st.sidebar.header("История (мультимодальные)")
     if st.sidebar.button("Очистить историю мультимодала"):
         st.session_state["mm_history"] = []
-    if st.session_state.get("mm_history"):
-    mm_bytes = json.dumps(st.session_state["mm_history"], indent=2, ensure_ascii=False).encode("utf-8")
-    st.download_button("📥 Скачать историю мультимодальных проверок", data=mm_bytes, file_name="mm_history.json", mime="application/json"))
+    if st.session_state["mm_history"]:
+        mm_bytes = json.dumps(st.session_state["mm_history"], indent=2, ensure_ascii=False).encode("utf-8")
+        st.sidebar.download_button("Скачать историю (JSON)", data=mm_bytes, file_name="mm_history.json", mime="application/json")
     else:
         st.sidebar.caption("История мультимодала пуста")
 
