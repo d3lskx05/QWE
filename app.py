@@ -627,7 +627,7 @@ if mode == "Работа с текстовыми моделями":
 elif mode == "Работа с мультимодальными моделями":
     st.header("🖼️ Мультимодальные сценарии")
 
-    # Простая история для мультимодала
+    # ===================== История мультимодала =====================
     if "mm_history" not in st.session_state:
         st.session_state["mm_history"] = []
 
@@ -645,16 +645,64 @@ elif mode == "Работа с мультимодальными моделями"
     else:
         st.sidebar.caption("История мультимодала пуста")
 
-    from multimodal import load_blip_model, generate_caption, load_clip_model, check_text_image_pair
+    # ===================== Выбор моделей =====================
+    st.sidebar.header("Настройки мультимодальных моделей")
+
+    # CLIP (A)
+    clip_source = st.sidebar.selectbox("Источник CLIP (A)", ["huggingface", "google_drive"], index=0, key="clip_source_a")
+    clip_id = st.sidebar.text_input("CLIP (A) Model ID / GDrive File ID", value="openai/clip-vit-base-patch32", key="clip_id_a")
+
+    # BLIP
+    blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0, key="blip_source")
+    blip_id = st.sidebar.text_input("BLIP Model ID / GDrive File ID", value="Salesforce/blip-image-captioning-base", key="blip_id")
+
+    # A/B тест для CLIP
+    enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая CLIP модель (B)", value=False)
+    if enable_mm_ab:
+        clip_source_b = st.sidebar.selectbox("Источник CLIP (B)", ["huggingface", "google_drive"], index=0, key="clip_source_b")
+        clip_id_b = st.sidebar.text_input("CLIP (B) Model ID / GDrive File ID", value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K", key="clip_id_b")
+    else:
+        clip_source_b, clip_id_b = None, None
+
+    from multimodal import load_blip_model, load_clip_model, check_text_image_pair, generate_caption
+    from utils import bootstrap_diff_ci
     from PIL import Image
     import pandas as pd
+    import numpy as np
     import json
+    import torch
+    import io, zipfile
+    import altair as alt
 
-    # ===================== BLIP Captioning =====================
+    try:
+        with st.spinner("Загружаю CLIP (A)..."):
+            clip_model_a, clip_proc_a = load_clip_model(clip_source, clip_id)
+        st.sidebar.success("CLIP (A) загружена")
+    except Exception as e:
+        st.sidebar.error(f"Ошибка загрузки CLIP (A): {e}")
+        st.stop()
+
+    clip_model_b, clip_proc_b = None, None
+    if enable_mm_ab and clip_id_b:
+        try:
+            with st.spinner("Загружаю CLIP (B)..."):
+                clip_model_b, clip_proc_b = load_clip_model(clip_source_b, clip_id_b)
+            st.sidebar.success("CLIP (B) загружена")
+        except Exception as e:
+            st.sidebar.error(f"Ошибка загрузки CLIP (B): {e}")
+            st.stop()
+
+    try:
+        with st.spinner("Загружаю BLIP..."):
+            blip_model_u, blip_proc_u = load_blip_model(blip_source, blip_id)
+        st.sidebar.success("BLIP загружена")
+    except Exception as e:
+        st.sidebar.error(f"Ошибка загрузки BLIP: {e}")
+        st.stop()
+
+    # ===================== BLIP Caption =====================
     with st.expander("🖼️ Генерация описания картинки (BLIP)"):
         st.markdown("Загрузите изображение, и BLIP предложит текстовое описание.")
-
-        blip_model, blip_processor = load_blip_model()
 
         uploaded_blip = st.file_uploader("Загрузите картинку для подписи", type=["jpg","jpeg","png"], key="blip_img")
 
@@ -664,7 +712,7 @@ elif mode == "Работа с мультимодальными моделями"
 
             if st.button("Сгенерировать описание", key="blip_caption_btn"):
                 with st.spinner("Генерация описания..."):
-                    caption = generate_caption(blip_model, blip_processor, img)
+                    caption = generate_caption(blip_model_u, blip_proc_u, img)
                 st.success(f"BLIP Caption: **{caption}**")
                 add_mm_history({
                     "type": "blip_caption",
@@ -673,12 +721,9 @@ elif mode == "Работа с мультимодальными моделями"
                     "timestamp": pd.Timestamp.now().isoformat()
                 })
 
-    # ===================== CLIP + BLIP сценарий =====================
+    # ===================== CLIP + BLIP сравнение =====================
     with st.expander("🤝 Сценарий: сравнение текста и BLIP-описания"):
         st.markdown("Загрузите картинку, получите описание через BLIP и сравните его с вашим текстом при помощи CLIP.")
-
-        clip_model, clip_processor = load_clip_model()
-        blip_model, blip_processor = load_blip_model()
 
         uploaded_joint = st.file_uploader("Загрузите картинку", type=["jpg","jpeg","png"], key="joint_img")
         user_text = st.text_input("Введите свой текст для сравнения", key="joint_text")
@@ -689,11 +734,11 @@ elif mode == "Работа с мультимодальными моделями"
 
             if st.button("Сравнить текст и BLIP-описание", key="joint_btn"):
                 with st.spinner("Генерация описания BLIP..."):
-                    blip_caption = generate_caption(blip_model, blip_processor, img)
+                    blip_caption = generate_caption(blip_model_u, blip_proc_u, img)
 
                 with st.spinner("Сравнение через CLIP..."):
-                    score_user = check_text_image_pair(clip_model, clip_processor, user_text, img) if user_text else None
-                    score_blip = check_text_image_pair(clip_model, clip_processor, blip_caption, img)
+                    score_user = check_text_image_pair(clip_model_a, clip_proc_a, user_text, img) if user_text else None
+                    score_blip = check_text_image_pair(clip_model_a, clip_proc_a, blip_caption, img)
 
                 st.subheader("Результаты")
                 st.markdown(f"**BLIP Caption:** {blip_caption}")
@@ -706,7 +751,9 @@ elif mode == "Работа с мультимодальными моделями"
                     "score_blip": float(score_blip),
                     "user_text": user_text if user_text else None,
                     "score_user": float(score_user) if score_user is not None else None,
-                    "timestamp": pd.Timestamp.now().isoformat()
+                    "timestamp": pd.Timestamp.now().isoformat(),
+                    "clip_model_a": clip_id,
+                    "blip_model": blip_id
                 }
 
                 if score_user is not None:
@@ -719,19 +766,196 @@ elif mode == "Работа с мультимодальными моделями"
 
                 add_mm_history(rec)
 
-    # ===================== История мультимодала (внизу) =====================
-    if st.session_state["mm_history"]:
-        st.header("История мультимодальных действий")
-        for i, rec in enumerate(reversed(st.session_state["mm_history"])):
-            st.markdown(f"### Запись #{len(st.session_state['mm_history']) - i}")
-            if rec.get("type") == "blip_caption":
-                st.markdown(f"**BLIP Caption** | Файл: `{rec.get('filename','')}` | Дата: {rec.get('timestamp','-')}")
-                st.markdown(f"**Подпись:** {rec.get('caption','')}")
-            elif rec.get("type") == "clip_compare":
-                st.markdown(f"**CLIP сравнение** | Файл: `{rec.get('filename','')}` | Дата: {rec.get('timestamp','-')}")
-                st.markdown(f"**BLIP Caption:** {rec.get('blip_caption','')}")
-                st.markdown(f"**CLIP score (BLIP ↔ img):** {rec.get('score_blip','-')}")
-                if rec.get("user_text") is not None:
-                    st.markdown(f"**Ваш текст:** {rec.get('user_text','')}")
-                    st.markdown(f"**CLIP score (ваш текст ↔ img):** {rec.get('score_user','-')}")
-            st.markdown("---")
+    # ===================== Пакетный анализ: CLIP Retrieval =====================
+    def _recall_at_k(sim_matrix: np.ndarray, k: int) -> float:
+        n = sim_matrix.shape[0]
+        ranks = np.argsort(-sim_matrix, axis=1)
+        hits = sum([1 if i in ranks[i, :k] else 0 for i in range(n)])
+        return hits / max(n, 1)
+
+    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        a = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
+        b = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
+        return a @ b.T
+
+    with st.expander("📦 Пакетный анализ: CLIP Retrieval (text↔image)"):
+        st.markdown("Загрузите CSV (`text,image`) и ZIP с файлами изображений. Для каждой строки CSV `image` должен совпадать с именем файла в ZIP.")
+
+        csv_file = st.file_uploader("CSV с парами (text,image)", type=["csv"], key="mm_clip_csv")
+        zip_file = st.file_uploader("ZIP с изображениями", type=["zip"], key="mm_clip_zip")
+
+        if csv_file and zip_file:
+            df_pairs = pd.read_csv(csv_file)
+            if not {"text", "image"}.issubset(df_pairs.columns):
+                st.error("CSV должен содержать колонки: text, image")
+            else:
+                zbytes = io.BytesIO(zip_file.read())
+                with zipfile.ZipFile(zbytes) as zf:
+                    names = set(zf.namelist())
+
+                    imgs, ok_rows = [], []
+                    for idx, row in df_pairs.iterrows():
+                        fname = str(row["image"])
+                        if fname in names:
+                            with zf.open(fname) as f:
+                                img = Image.open(io.BytesIO(f.read())).convert("RGB")
+                            imgs.append(img)
+                            ok_rows.append(idx)
+                        else:
+                            st.warning(f"Нет файла в ZIP: {fname}")
+
+                    if imgs:
+                        df_eval = df_pairs.loc[ok_rows].reset_index(drop=True)
+                        texts = df_eval["text"].astype(str).tolist()
+
+                        with st.spinner("Кодирую тексты (CLIP A)..."):
+                            inputs_t = clip_proc_a(text=texts, return_tensors="pt", padding=True, truncation=True)
+                            with torch.no_grad():
+                                t_emb_a = clip_model_a.get_text_features(**inputs_t).cpu().numpy()
+
+                        with st.spinner("Кодирую изображения (CLIP A)..."):
+                            inputs_i = clip_proc_a(images=imgs, return_tensors="pt")
+                            with torch.no_grad():
+                                i_emb_a = clip_model_a.get_image_features(**inputs_i).cpu().numpy()
+
+                        sim_a = _cosine_sim(t_emb_a, i_emb_a)
+
+                        r1 = _recall_at_k(sim_a, 1)
+                        r5 = _recall_at_k(sim_a, 5) if sim_a.shape[1] >= 5 else np.nan
+                        r10 = _recall_at_k(sim_a, 10) if sim_a.shape[1] >= 10 else np.nan
+
+                        st.subheader("Метрики (CLIP A)")
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Recall@1", f"{r1:.3f}")
+                        c2.metric("Recall@5", f"{r5:.3f}" if not np.isnan(r5) else "—")
+                        c3.metric("Recall@10", f"{r10:.3f}" if not np.isnan(r10) else "—")
+
+                        best_scores = sim_a.max(axis=1)
+                        chart = alt.Chart(pd.DataFrame({"best_score": best_scores})).mark_bar().encode(
+                            alt.X("best_score:Q", bin=alt.Bin(maxbins=30), title="Лучший score по строке (text→image)"),
+                            y='count()', tooltip=['count()']
+                        ).interactive()
+                        st.altair_chart(chart, use_container_width=True)
+
+                        # A/B сравнение
+                        if clip_model_b is not None:
+                            with st.spinner("Кодирую тексты (CLIP B)..."):
+                                inputs_t_b = clip_proc_b(text=texts, return_tensors="pt", padding=True, truncation=True)
+                                with torch.no_grad():
+                                    t_emb_b = clip_model_b.get_text_features(**inputs_t_b).cpu().numpy()
+                            with st.spinner("Кодирую изображения (CLIP B)..."):
+                                inputs_i_b = clip_proc_b(images=imgs, return_tensors="pt")
+                                with torch.no_grad():
+                                    i_emb_b = clip_model_b.get_image_features(**inputs_i_b).cpu().numpy()
+                            sim_b = _cosine_sim(t_emb_b, i_emb_b)
+
+                            r1_b = _recall_at_k(sim_b, 1)
+                            r5_b = _recall_at_k(sim_b, 5) if sim_b.shape[1] >= 5 else np.nan
+                            r10_b = _recall_at_k(sim_b, 10) if sim_b.shape[1] >= 10 else np.nan
+
+                            st.subheader("A/B сравнение (B против A)")
+                            d1, d2, d3 = st.columns(3)
+                            d1.metric("Δ Recall@1", f"{(r1_b - r1):+.3f}")
+                            d2.metric("Δ Recall@5", f"{(r5_b - r5):+.3f}" if not (np.isnan(r5) or np.isnan(r5_b)) else "—")
+                            d3.metric("Δ Recall@10", f"{(r10_b - r10):+.3f}" if not (np.isnan(r10) or np.isnan(r10_b)) else "—")
+
+                            mean_diff, low, high = bootstrap_diff_ci(sim_b.max(axis=1), sim_a.max(axis=1), n_boot=500)
+                            st.caption(f"Бутстрэп ДИ (95%) для Δ best_score (B−A): [{low:+.4f}, {high:+.4f}], средняя: {mean_diff:+.4f}")
+
+    # ===================== Анализ BLIP Caption (BLEU / ROUGE) =====================
+    def _ngrams(tokens: list, n: int) -> set:
+        return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
+
+    def _bleu(ref: str, hyp: str, n: int = 4) -> float:
+        ref_tokens = ref.lower().split()
+        hyp_tokens = hyp.lower().split()
+        score = 0.0
+        for i in range(1, n+1):
+            ref_ngr = _ngrams(ref_tokens, i)
+            hyp_ngr = _ngrams(hyp_tokens, i)
+            inter = len(ref_ngr & hyp_ngr)
+            total = max(len(hyp_ngr), 1)
+            score += inter / total
+        return score / n
+
+    def _rouge_l(ref: str, hyp: str) -> float:
+        ref_tokens = ref.lower().split()
+        hyp_tokens = hyp.lower().split()
+        dp = [[0]*(len(hyp_tokens)+1) for _ in range(len(ref_tokens)+1)]
+        for i in range(1, len(ref_tokens)+1):
+            for j in range(1, len(hyp_tokens)+1):
+                if ref_tokens[i-1] == hyp_tokens[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        lcs = dp[-1][-1]
+        return lcs / max(len(ref_tokens), 1)
+
+    with st.expander("📊 Анализ BLIP Caption против эталонных описаний"):
+        st.markdown("Загрузите CSV с колонками: `image`, `reference_caption`. ZIP с изображениями обязателен. BLIP сгенерирует подписи, а затем сравнит с эталонными BLEU и ROUGE-L.")
+
+        csv_blip = st.file_uploader("CSV (image, reference_caption)", type=["csv"], key="blip_eval_csv")
+        zip_blip = st.file_uploader("ZIP с изображениями", type=["zip"], key="blip_eval_zip")
+
+        if csv_blip and zip_blip:
+            df_ref = pd.read_csv(csv_blip)
+            if not {"image", "reference_caption"}.issubset(df_ref.columns):
+                st.error("CSV должен содержать колонки: image, reference_caption")
+            else:
+                zbytes = io.BytesIO(zip_blip.read())
+                with zipfile.ZipFile(zbytes) as zf:
+                    names = set(zf.namelist())
+                    refs, hyps, bleus, rouges = [], [], [], []
+
+                    for idx, row in df_ref.iterrows():
+                        fname = str(row["image"])
+                        ref_caption = str(row["reference_caption"])
+                        if fname not in names:
+                            st.warning(f"Нет файла в ZIP: {fname}")
+                            continue
+                        with zf.open(fname) as f:
+                            img = Image.open(io.BytesIO(f.read())).convert("RGB")
+
+                        with torch.no_grad():
+                            hyp_caption = generate_caption(blip_model_u, blip_proc_u, img)
+
+                        bleu_score = _bleu(ref_caption, hyp_caption)
+                        rouge_score = _rouge_l(ref_caption, hyp_caption)
+
+                        refs.append(ref_caption)
+                        hyps.append(hyp_caption)
+                        bleus.append(bleu_score)
+                        rouges.append(rouge_score)
+
+                    if bleus:
+                        df_eval = pd.DataFrame({
+                            "image": df_ref["image"].iloc[:len(bleus)],
+                            "reference": refs,
+                            "hypothesis": hyps,
+                            "BLEU": bleus,
+                            "ROUGE-L": rouges
+                        })
+
+                        st.subheader("Результаты BLEU / ROUGE-L")
+                        st.dataframe(df_eval)
+
+                        c1, c2 = st.columns(2)
+                        c1.metric("Средний BLEU", f"{np.mean(bleus):.3f}")
+                        c2.metric("Средний ROUGE-L", f"{np.mean(rouges):.3f}")
+
+                        st.markdown("**Распределение BLEU**")
+                        chart_bleu = alt.Chart(pd.DataFrame({"BLEU": bleus})).mark_bar().encode(
+                            alt.X("BLEU:Q", bin=alt.Bin(maxbins=30)),
+                            y='count()', tooltip=['count()']
+                        ).interactive()
+                        st.altair_chart(chart_bleu, use_container_width=True)
+
+                        st.markdown("**Распределение ROUGE-L**")
+                        chart_rouge = alt.Chart(pd.DataFrame({"ROUGE-L": rouges})).mark_bar().encode(
+                            alt.X("ROUGE-L:Q", bin=alt.Bin(maxbins=30)),
+                            y='count()', tooltip=['count()']
+                        ).interactive()
+                        st.altair_chart(chart_rouge, use_container_width=True)
+
+                        mm_bytes_eval = df_eval.to_csv(index=False).encode("utf-8")
+                        st.download_button("Скачать результаты", data=mm_bytes_eval, file_name="blip_eval_results.csv", mime="text/csv")
