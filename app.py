@@ -641,13 +641,18 @@ elif mode == "Работа с мультимодальными моделями"
         st.session_state["mm_history"] = []
     if st.session_state["mm_history"]:
         import copy
-        safe_history = copy.deepcopy(st.session_state["mm_history"])
-        for rec in safe_history:
-            for k, v in rec.items():
-                try:
-                    json.dumps(v)  # проверяем, сериализуемо ли значение
-                except TypeError:
-                    rec[k] = str(v)
+
+        def make_json_safe(obj):
+            """Преобразует объект в сериализуемый вид"""
+            if isinstance(obj, (str, int, float, bool)) or obj is None:
+                return obj
+            if isinstance(obj, dict):
+                return {k: make_json_safe(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [make_json_safe(v) for v in obj]
+            return str(obj)  # всё остальное → строка
+
+        safe_history = make_json_safe(copy.deepcopy(st.session_state["mm_history"]))
 
         mm_bytes = json.dumps(
             safe_history,
