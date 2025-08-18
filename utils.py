@@ -1,5 +1,3 @@
-# utils.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,14 +8,13 @@ import tempfile
 import os
 import shutil
 import zipfile
-import time
 import tarfile
 import re
 from typing import List, Tuple, Dict, Any
 
 from sentence_transformers import SentenceTransformer, util
 
-# ============== Утилиты ==============
+# ============== Утилиты текста/файлов ==============
 
 def preprocess_text(t: Any) -> str:
     if pd.isna(t):
@@ -29,19 +26,17 @@ def file_md5(b: bytes) -> str:
 
 def _try_read_json(raw: bytes) -> pd.DataFrame:
     """
-    Пытаемся прочитать JSON/NDJSON в таблицу.
-    Поддержка форматов:
+    Поддерживаем:
       - [{"phrase_1": "...", "phrase_2": "...", ...}, ...]
       - NDJSON (по строке на объект)
-      - {"phrase_1": [...], "phrase_2":[...], ...} (ориентация columns)
+      - {"phrase_1": [...], "phrase_2":[...], ...} (columns-orient)
     """
-    # 1) список объектов
+    # 1) список объектов / columns-orient
     try:
         obj = json.loads(raw.decode("utf-8"))
         if isinstance(obj, list):
             return pd.DataFrame(obj)
         if isinstance(obj, dict):
-            # columns-orient
             return pd.DataFrame(obj)
     except Exception:
         pass
@@ -55,7 +50,6 @@ def _try_read_json(raw: bytes) -> pd.DataFrame:
 def read_uploaded_file_bytes(uploaded) -> Tuple[pd.DataFrame, str]:
     raw = uploaded.read()
     h = file_md5(raw)
-    # Пытаемся по расширению
     name = (uploaded.name or "").lower()
     if name.endswith(".json") or name.endswith(".ndjson"):
         df = _try_read_json(raw)
@@ -175,7 +169,7 @@ def bootstrap_diff_ci(a: np.ndarray, b: np.ndarray, n_boot: int = 500, seed: int
     high = float(np.quantile(diffs, 1-(1-ci)/2))
     return mean_diff, low, high
 
-# ============== Загрузка модели ==============
+# ============== Загрузка модели / кэш ==============
 
 def download_file_from_gdrive(file_id: str) -> str:
     import gdown
