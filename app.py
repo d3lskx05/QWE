@@ -626,54 +626,6 @@ if mode == "Работа с текстовыми моделями":
 # ===================== РЕЖИМ: МУЛЬТИМОДАЛЬНЫЕ МОДЕЛИ =====================
 elif mode == "Работа с мультимодальными моделями":
     st.header("🖼️ Мультимодальные сценарии")
-    # ====== Сайдбар: настройки мультимодальных моделей ======
-st.sidebar.header("Настройки мультимодальных моделей")
-
-# CLIP (A)
-clip_source = st.sidebar.selectbox("Источник CLIP (A)", ["huggingface", "google_drive"], index=0, key="clip_source_a")
-clip_id = st.sidebar.text_input("CLIP (A) Model ID / GDrive File ID", value="openai/clip-vit-base-patch32", key="clip_id_a")
-
-# BLIP
-blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0, key="blip_source")
-blip_id = st.sidebar.text_input("BLIP Model ID / GDrive File ID", value="Salesforce/blip-image-captioning-base", key="blip_id")
-
-# A/B тест для CLIP
-enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая CLIP модель (B)", value=False)
-if enable_mm_ab:
-    clip_source_b = st.sidebar.selectbox("Источник CLIP (B)", ["huggingface", "google_drive"], index=0, key="clip_source_b")
-    clip_id_b = st.sidebar.text_input("CLIP (B) Model ID / GDrive File ID", value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K", key="clip_id_b")
-else:
-    clip_source_b, clip_id_b = None, None
-
-# ====== Загрузка моделей ======
-from multimodal import load_blip_model, load_clip_model, check_text_image_pair, generate_caption
-from utils import bootstrap_diff_ci
-
-try:
-    with st.spinner("Загружаю CLIP (A)..."):
-        clip_model_a, clip_proc_a = load_clip_model(clip_source, clip_id)
-    st.sidebar.success("CLIP (A) загружена")
-except Exception as e:
-    st.sidebar.error(f"Ошибка загрузки CLIP (A): {e}")
-    st.stop()
-
-clip_model_b, clip_proc_b = None, None
-if enable_mm_ab and clip_id_b:
-    try:
-        with st.spinner("Загружаю CLIP (B)..."):
-            clip_model_b, clip_proc_b = load_clip_model(clip_source_b, clip_id_b)
-        st.sidebar.success("CLIP (B) загружена")
-    except Exception as e:
-        st.sidebar.error(f"Ошибка загрузки CLIP (B): {e}")
-        st.stop()
-
-try:
-    with st.spinner("Загружаю BLIP..."):
-        blip_model_u, blip_proc_u = load_blip_model(blip_source, blip_id)
-    st.sidebar.success("BLIP загружена")
-except Exception as e:
-    st.sidebar.error(f"Ошибка загрузки BLIP: {e}")
-    st.stop()
 
     # Простая история для мультимодала
     if "mm_history" not in st.session_state:
