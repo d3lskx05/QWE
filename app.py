@@ -16,6 +16,7 @@ if mode == "Работа с текстовыми моделями":
     import altair as alt
     import pandas as pd
     import numpy as np
+    import copy
     import json
     from typing import List
 
