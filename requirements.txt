@@ -18,4 +18,3 @@ pymorphy2>=0.9.1
 # Прочее
 scikit-learn>=1.3.0
 gdown
-copy
