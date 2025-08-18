@@ -118,8 +118,18 @@ if mode == "Работа с текстовыми моделями":
         clear_history()
 
     if st.session_state["history"]:
-        st.write("DEBUG mm_history:", st.session_state["mm_history"])
-        history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
+        def _json_safe(obj):
+    try:
+        return json.dumps(obj, ensure_ascii=False, indent=2)
+    except TypeError:
+        return str(obj)
+
+mm_bytes = json.dumps(
+    st.session_state["mm_history"], 
+    indent=2, 
+    ensure_ascii=False, 
+    default=str   # <-- ключевой момент
+).encode("utf-8")
         st.sidebar.download_button("Скачать историю (JSON)", data=history_bytes, file_name="history.json", mime="application/json")
     else:
         st.sidebar.caption("История пустая")
