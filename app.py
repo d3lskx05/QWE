@@ -648,9 +648,8 @@ elif mode == "Работа с мультимодальными моделями"
             value="Salesforce/blip-image-captioning-large" if mm_kind.startswith("BLIP") else "openai/clip-vit-base-patch32",
             key="mm_id2"
         )
-
     mm1, proc1, mm2, proc2 = None, None, None, None
-    load_models_btn:
+    if load_models_btn:
         try:
             import multimodal as mm
             if mm_kind.startswith("BLIP"):
