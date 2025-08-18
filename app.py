@@ -648,22 +648,8 @@ elif mode == "Работа с мультимодальными моделями"
             value="Salesforce/blip-image-captioning-large" if mm_kind.startswith("BLIP") else "openai/clip-vit-base-patch32",
             key="mm_id2"
         )
-    mm1, proc1, mm2, proc2 = None, None, None, None
-    if load_models_btn:
-        try:
-            import multimodal as mm
-            if mm_kind.startswith("BLIP"):
-                mm1, proc1 = mm.load_blip_model_custom(mm_source_1, mm_id_1)
-                if mm_compare and mm_id_2:
-                    mm2, proc2 = mm.load_blip_model_custom(mm_source_2, mm_id_2)
-            else:  # CLIP
-                mm1, proc1 = mm.load_clip_model_custom(mm_source_1, mm_id_1)
-                if mm_compare and mm_id_2:
-                    mm2, proc2 = mm.load_clip_model_custom(mm_source_2, mm_id_2)
-            st.sidebar.success("Модель(и) загружены")
-        except Exception as e:
-            st.sidebar.error(f"Ошибка при загрузке: {e}")
 
+    load_models_btn = st.sidebar.button("Загрузить мультимодель(и)")
     # Простая история для мультимодала
     if "mm_history" not in st.session_state:
         st.session_state["mm_history"] = []
