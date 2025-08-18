@@ -609,3 +609,64 @@ if st.session_state["history"]:
                 styled_hist_df = style_suspicious_and_low(saved_df, 0.8, 0.3, 0.75)
                 st.dataframe(styled_hist_df, use_container_width=True)
         st.markdown("---")
+
+# ===================== BLIP Captioning =====================
+with st.expander("🖼️ Генерация описания картинки (BLIP)"):
+    st.markdown("Загрузите изображение, и BLIP предложит текстовое описание.")
+
+    from multimodal import load_blip_model, generate_caption
+
+    blip_model, blip_processor = load_blip_model()
+
+    uploaded_blip = st.file_uploader("Загрузите картинку для подписи", type=["jpg","jpeg","png"], key="blip_img")
+
+    if uploaded_blip:
+        from PIL import Image
+        img = Image.open(uploaded_blip).convert("RGB")
+        st.image(img, caption="Загруженное изображение", use_column_width=True)
+
+        if st.button("Сгенерировать описание", key="blip_caption_btn"):
+            with st.spinner("Генерация описания..."):
+                caption = generate_caption(blip_model, blip_processor, img)
+            st.success(f"BLIP Caption: **{caption}**")
+
+# ===================== CLIP + BLIP сценарий =====================
+with st.expander("🤝 Сценарий: сравнение текста и BLIP-описания"):
+    st.markdown("Загрузите картинку, получите описание через BLIP и сравните его с вашим текстом при помощи CLIP.")
+
+    from multimodal import (
+        load_clip_model, check_text_image_pair,
+        load_blip_model, generate_caption
+    )
+
+    clip_model, clip_processor = load_clip_model()
+    blip_model, blip_processor = load_blip_model()
+
+    uploaded_joint = st.file_uploader("Загрузите картинку", type=["jpg","jpeg","png"], key="joint_img")
+    user_text = st.text_input("Введите свой текст для сравнения", key="joint_text")
+
+    if uploaded_joint:
+        from PIL import Image
+        img = Image.open(uploaded_joint).convert("RGB")
+        st.image(img, caption="Загруженное изображение", use_column_width=True)
+
+        if st.button("Сравнить текст и BLIP-описание", key="joint_btn"):
+            with st.spinner("Генерация описания BLIP..."):
+                blip_caption = generate_caption(blip_model, blip_processor, img)
+
+            with st.spinner("Сравнение через CLIP..."):
+                score_user = check_text_image_pair(clip_model, clip_processor, user_text, img) if user_text else None
+                score_blip = check_text_image_pair(clip_model, clip_processor, blip_caption, img)
+
+            st.subheader("Результаты")
+            st.markdown(f"**BLIP Caption:** {blip_caption}")
+            st.metric("CLIP score (BLIP caption ↔ image)", f"{score_blip:.4f}")
+
+            if score_user is not None:
+                delta = score_user - score_blip
+                st.metric("CLIP score (ваш текст ↔ image)", f"{score_user:.4f}", delta=f"{delta:+.4f}")
+                if score_user > score_blip:
+                    st.success("✅ Ваш текст лучше соответствует картинке, чем автогенерация BLIP!")
+                else:
+                    st.info("ℹ️ BLIP-описание оказалось ближе к картинке, чем ваш текст.")
+
