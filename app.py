@@ -827,8 +827,7 @@ elif mode == "Работа с мультимодальными моделями"
                     ratings = []
                     for idx, (img, ref, hyp) in enumerate(zip(imgs, refs, hyps)):
                         st.image(img, width=150)
-                        st.write(f"**Reference:** {ref}
-**Hypothesis:** {hyp}")
+                        st.write(f"**Reference:** {ref}\n**Hypothesis:** {hyp}")
                         rating = st.slider("Оценка (1–5)", 1, 5, 3, key=f"rate_{idx}")
                         ratings.append({"ref": ref, "hyp": hyp, "rating": int(rating)})
                     if st.button("Сохранить оценки"):
