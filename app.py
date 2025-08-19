@@ -658,32 +658,30 @@ elif mode == "Работа с мультимодальными моделями"
     blip_choice = st.sidebar.selectbox("BLIP-модель", ["BLIP-base", "BLIP-2 (Flan-T5)"], index=0)
     blip_id = "Salesforce/blip-image-captioning-base" if blip_choice == "BLIP-base" else "Salesforce/blip2-flan-t5-base"
 
-    from multimodal import load_blip_model, load_clip_model, generate_caption
-    from mm_utils import batch_infer, precision_at_k, mrr, umap_projection
+    # 🔹 Импорты
+    import multimodal as mm
+    from mm_utils import precision_at_k, mrr, umap_projection, recall_at_k
     from PIL import Image
     import pandas as pd, numpy as np, torch, io, zipfile, altair as alt
-    from sklearn.metrics import average_precision_score
-    import matplotlib.pyplot as plt
 
     # ===================== Загрузка моделей =====================
-    clip_model_a, clip_proc_a = load_clip_model("huggingface", clip_id)
+    clip_model_a, clip_proc_a = mm.load_clip_model("huggingface", clip_id)
     clip_model_b, clip_proc_b = None, None
     if enable_mm_ab and clip_id_b:
-        clip_model_b, clip_proc_b = load_clip_model("huggingface", clip_id_b)
+        clip_model_b, clip_proc_b = mm.load_clip_model("huggingface", clip_id_b)
 
-    blip_model, blip_proc = load_blip_model("huggingface", blip_id)
+    blip_model, blip_proc = mm.load_blip_model("huggingface", blip_id)
 
     # ===================== 1) BLIP Caption Evaluation =====================
     with st.expander("📊 Оценка Caption (BLIP / BLIP-2)"):
         csv_blip = st.file_uploader("CSV (image, reference_caption)", type=["csv"], key="blip_eval_csv")
         zip_blip = st.file_uploader("ZIP images", type=["zip"], key="blip_eval_zip")
-        gpt_eval = st.checkbox("Использовать GPT-based оценку (если есть API ключ)", value=False)
 
         if csv_blip and zip_blip:
             df_ref = pd.read_csv(csv_blip)
             zbytes = io.BytesIO(zip_blip.read())
             with zipfile.ZipFile(zbytes) as zf:
-                refs, hyps, imgs = [], [], []
+                refs, hyps = [], []
                 for _, row in df_ref.iterrows():
                     fname, ref = str(row["image"]), str(row["reference_caption"])
                     if fname not in zf.namelist():
@@ -691,39 +689,14 @@ elif mode == "Работа с мультимодальными моделями"
                         continue
                     with zf.open(fname) as f:
                         img = Image.open(io.BytesIO(f.read())).convert("RGB")
-                    hyp = generate_caption(blip_model, blip_proc, img)
-                    refs.append(ref); hyps.append(hyp); imgs.append(img)
+                    hyp = mm.generate_caption(blip_model, blip_proc, img)
+                    refs.append(ref); hyps.append(hyp)
 
                 if refs:
-                    st.subheader("Метрики captioning")
-                    bleu = np.mean([bleu_n(r, h) for r, h in zip(refs, hyps)])
-                    rouge = np.mean([rouge_l(r, h) for r, h in zip(refs, hyps)])
-                    cider_val = light_cider(refs, hyps)
-                    spice_val = light_spice(refs, hyps)
-                    clip_score_val = clipscore(clip_model_a, clip_proc_a, hyps, imgs)
-
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    c1.metric("BLEU", f"{bleu:.3f}")
-                    c2.metric("ROUGE-L", f"{rouge:.3f}")
-                    c3.metric("CIDEr-light", f"{cider_val:.3f}")
-                    c4.metric("SPICE-light", f"{spice_val:.3f}")
-                    c5.metric("CLIPScore", f"{clip_score_val:.3f}")
-
-                    if gpt_eval:
-                        import openai
-                        openai.api_key = st.sidebar.text_input("OpenAI API key", type="password")
-                        if openai.api_key:
-                            st.subheader("GPT-based оценка")
-                            ratings = []
-                            for ref, hyp in zip(refs, hyps):
-                                prompt = f"Оцени соответствие caption к reference по шкале 1-5.\nReference: {ref}\nCaption: {hyp}"
-                                resp = openai.ChatCompletion.create(
-                                    model="gpt-4o-mini",
-                                    messages=[{"role": "user", "content": prompt}]
-                                )
-                                score = resp["choices"][0]["message"]["content"].strip()
-                                ratings.append({"ref": ref, "hyp": hyp, "gpt_score": score})
-                            st.json(ratings)
+                    st.subheader("Примеры сгенерированных caption")
+                    for r, h in zip(refs[:5], hyps[:5]):
+                        st.write(f"**GT:** {r}")
+                        st.write(f"**BLIP:** {h}")
 
     # ===================== 2) CLIP Retrieval (Text→Image) =====================
     with st.expander("📦 Retrieval (CLIP / SigLIP)"):
@@ -746,9 +719,10 @@ elif mode == "Работа с мультимодальными моделями"
 
                 if imgs:
                     with torch.no_grad():
-                        t_emb = batch_infer(clip_model_a, clip_proc_a, texts, mode="text")
-                        i_emb = batch_infer(clip_model_a, clip_proc_a, imgs, mode="image")
-                    sim_a = _cosine_sim(t_emb, i_emb)
+                        t_emb = mm.encode_texts(clip_model_a, clip_proc_a, texts)
+                        i_emb = mm.encode_images(clip_model_a, clip_proc_a, imgs)
+
+                    sim_a = mm.cosine_similarity_batch(t_emb, i_emb)
 
                     r1, r5, r10 = recall_at_k(sim_a, 1), recall_at_k(sim_a, 5), recall_at_k(sim_a, 10)
                     prec5, mrr_val = precision_at_k(sim_a, 5), mrr(sim_a)
@@ -786,4 +760,3 @@ elif mode == "Работа с мультимодальными моделями"
             file_name="mm_history.json",
             mime="application/json",
         )
-
