@@ -638,42 +638,155 @@ elif mode == "Работа с мультимодальными моделями"
 
     st.sidebar.header("Настройки мультимодальных моделей")
 
-    # ===================== Выбор моделей =====================
-    clip_model_choice = st.sidebar.selectbox("Vision-encoder (A)", ["CLIP", "SigLIP"], index=0)
-    clip_id = st.sidebar.text_input(
-        "Model ID (A)", 
-        value="openai/clip-vit-base-patch32" if clip_model_choice == "CLIP" else "google/siglip-base-patch16"
-    )
+    # ===================== Выбор и загрузка моделей =====================
+    clip_source = st.sidebar.selectbox("Источник CLIP (A)", ["huggingface", "google_drive"], index=0)
+    clip_id = st.sidebar.text_input("CLIP (A) Model ID", value="openai/clip-vit-base-patch32")
 
-    enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая модель (B)", value=False)
+    enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая CLIP (B)", value=False)
     if enable_mm_ab:
-        clip_model_choice_b = st.sidebar.selectbox("Vision-encoder (B)", ["CLIP", "SigLIP"], index=0)
-        clip_id_b = st.sidebar.text_input(
-            "Model ID (B)", 
-            value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K" if clip_model_choice_b == "CLIP" else "google/siglip-large-patch16"
-        )
+        clip_source_b = st.sidebar.selectbox("Источник CLIP (B)", ["huggingface", "google_drive"], index=0)
+        clip_id_b = st.sidebar.text_input("CLIP (B) Model ID", value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K")
     else:
-        clip_model_choice_b, clip_id_b = None, None
+        clip_source_b, clip_id_b = None, None
 
-    blip_choice = st.sidebar.selectbox("BLIP-модель", ["BLIP-base", "BLIP-2 (Flan-T5)"], index=0)
-    blip_id = "Salesforce/blip-image-captioning-base" if blip_choice == "BLIP-base" else "Salesforce/blip2-flan-t5-base"
+    blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0)
+    blip_id = st.sidebar.text_input("BLIP Model ID", value="Salesforce/blip-image-captioning-base")
 
-    # 🔹 Импорты
-    import multimodal as mm
-    from mm_utils import precision_at_k, mrr, umap_projection, recall_at_k
+    from multimodal import load_blip_model, load_clip_model, generate_caption
     from PIL import Image
     import pandas as pd, numpy as np, torch, io, zipfile, altair as alt
+    from sklearn.metrics import average_precision_score
+    import matplotlib.pyplot as plt
 
     # ===================== Загрузка моделей =====================
-    clip_model_a, clip_proc_a = mm.load_clip_model("huggingface", clip_id)
+    clip_model_a, clip_proc_a = load_clip_model(clip_source, clip_id)
     clip_model_b, clip_proc_b = None, None
     if enable_mm_ab and clip_id_b:
-        clip_model_b, clip_proc_b = mm.load_clip_model("huggingface", clip_id_b)
+        clip_model_b, clip_proc_b = load_clip_model(clip_source_b, clip_id_b)
 
-    blip_model, blip_proc = mm.load_blip_model("huggingface", blip_id)
+    blip_model, blip_proc = load_blip_model(blip_source, blip_id)
+
+    # ===================== Метрики Captioning =====================
+    def _ngrams(tokens, n):
+        return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
+
+    def bleu_n(ref, hyp, n=4):
+        ref_t, hyp_t = ref.lower().split(), hyp.lower().split()
+        if not hyp_t:
+            return 0.0
+        score = 0.0
+        for k in range(1, n+1):
+            ref_ngr, hyp_ngr = _ngrams(ref_t, k), _ngrams(hyp_t, k)
+            score += len(ref_ngr & hyp_ngr) / max(len(hyp_ngr), 1)
+        return score / n
+
+    def rouge_l(ref, hyp):
+        ref_t, hyp_t = ref.lower().split(), hyp.lower().split()
+        dp = [[0]*(len(hyp_t)+1) for _ in range(len(ref_t)+1)]
+        for i in range(1, len(ref_t)+1):
+            for j in range(1, len(hyp_t)+1):
+                if ref_t[i-1] == hyp_t[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        return dp[-1][-1] / max(len(ref_t), 1)
+
+    def light_cider(refs, hyps, n_max=4):
+        scores = []
+        for r, h in zip(refs, hyps):
+            r_t, h_t = r.lower().split(), h.lower().split()
+            if not h_t: scores.append(0.0); continue
+            s = 0.0
+            for n in range(1, n_max+1):
+                r_ngr, h_ngr = _ngrams(r_t, n), _ngrams(h_t, n)
+                s += len(r_ngr & h_ngr) / max(len(h_ngr), 1)
+            scores.append(s/n_max)
+        return float(np.mean(scores)) if scores else 0.0
+
+    def light_spice(refs, hyps):
+        scores = []
+        for r, h in zip(refs, hyps):
+            scores.append(len(set(r.lower().split()) & set(h.lower().split())) / max(len(h.split()), 1))
+        return float(np.mean(scores)) if scores else 0.0
+
+    def distinct_n(hyps, n=2):
+        ngrams = []
+        for h in hyps:
+            tokens = h.lower().split()
+            ngrams.extend([tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)])
+        return len(set(ngrams)) / max(len(ngrams), 1)
+
+    def self_bleu(hyps, n=4):
+        scores = []
+        for i, h in enumerate(hyps):
+            others = hyps[:i] + hyps[i+1:]
+            if not others:
+                continue
+            ref = " ".join(others)
+            scores.append(bleu_n(ref, h, n=n))
+        return float(np.mean(scores)) if scores else 0.0
+
+    # CLIPScore для captioning
+    def clipscore(clip_model, clip_proc, hyps, imgs):
+        with torch.no_grad():
+            inputs_t = clip_proc(text=hyps, return_tensors="pt", padding=True, truncation=True)
+            t_emb = clip_model.get_text_features(**inputs_t).cpu().numpy()
+            inputs_i = clip_proc(images=imgs, return_tensors="pt")
+            i_emb = clip_model.get_image_features(**inputs_i).cpu().numpy()
+        sim = (t_emb / np.linalg.norm(t_emb, axis=1, keepdims=True)) @ (i_emb / np.linalg.norm(i_emb, axis=1, keepdims=True)).T
+        return float(np.mean(np.diag(sim)))
+
+    # ===================== Метрики Retrieval =====================
+    def _cosine_sim(a, b):
+        a = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
+        b = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
+        return a @ b.T
+
+    def recall_at_k(sim_matrix, k):
+        ranks = np.argsort(-sim_matrix, axis=1)
+        hits = sum(1 if i in ranks[i, :k] else 0 for i in range(sim_matrix.shape[0]))
+        return hits / sim_matrix.shape[0]
+
+    def mean_average_precision(sim_matrix):
+        y_true = np.eye(sim_matrix.shape[0])
+        aps = []
+        for i in range(sim_matrix.shape[0]):
+            aps.append(average_precision_score(y_true[i], sim_matrix[i]))
+        return np.mean(aps)
+
+    def ndcg(sim_matrix, k=10):
+        n = sim_matrix.shape[0]
+        ndcgs = []
+        for i in range(n):
+            scores = sim_matrix[i]
+            idx = np.argsort(-scores)[:k]
+            gains = [1 if j == i else 0 for j in idx]
+            discounts = [1/np.log2(r+2) for r in range(len(gains))]
+            dcg = sum(g * d for g, d in zip(gains, discounts))
+            ndcgs.append(dcg/1.0)
+        return np.mean(ndcgs)
+
+    def median_rank(sim_matrix):
+        ranks = np.argsort(-sim_matrix, axis=1)
+        positions = [np.where(ranks[i] == i)[0][0] + 1 for i in range(sim_matrix.shape[0])]
+        return np.median(positions)
+
+    def bootstrap_metric_diff(rows, metric_fn, sim_a, sim_b, iters=300, k=None):
+        rng = np.random.default_rng(42)
+        diffs = []
+        for _ in range(iters):
+            idx = rng.integers(0, rows, size=rows)
+            sa, sb = sim_a[idx][:, idx], sim_b[idx][:, idx]
+            if metric_fn is recall_at_k:
+                diffs.append(metric_fn(sb, k) - metric_fn(sa, k))
+            elif metric_fn is ndcg:
+                diffs.append(metric_fn(sb, k) - metric_fn(sa, k))
+            else:
+                diffs.append(metric_fn(sb) - metric_fn(sa))
+        return np.array(diffs)
 
     # ===================== 1) BLIP Caption Evaluation =====================
-    with st.expander("📊 Оценка Caption (BLIP / BLIP-2)"):
+    with st.expander("📊 Оценка BLIP Caption"):
         csv_blip = st.file_uploader("CSV (image, reference_caption)", type=["csv"], key="blip_eval_csv")
         zip_blip = st.file_uploader("ZIP images", type=["zip"], key="blip_eval_zip")
 
@@ -681,7 +794,7 @@ elif mode == "Работа с мультимодальными моделями"
             df_ref = pd.read_csv(csv_blip)
             zbytes = io.BytesIO(zip_blip.read())
             with zipfile.ZipFile(zbytes) as zf:
-                refs, hyps = [], []
+                refs, hyps, imgs = [], [], []
                 for _, row in df_ref.iterrows():
                     fname, ref = str(row["image"]), str(row["reference_caption"])
                     if fname not in zf.namelist():
@@ -689,19 +802,43 @@ elif mode == "Работа с мультимодальными моделями"
                         continue
                     with zf.open(fname) as f:
                         img = Image.open(io.BytesIO(f.read())).convert("RGB")
-                    hyp = mm.generate_caption(blip_model, blip_proc, img)
-                    refs.append(ref); hyps.append(hyp)
+                    hyp = generate_caption(blip_model, blip_proc, img)
+                    refs.append(ref); hyps.append(hyp); imgs.append(img)
 
                 if refs:
-                    st.subheader("Примеры сгенерированных caption")
-                    for r, h in zip(refs[:5], hyps[:5]):
-                        st.write(f"**GT:** {r}")
-                        st.write(f"**BLIP:** {h}")
+                    bleu = np.mean([bleu_n(r, h) for r, h in zip(refs, hyps)])
+                    rouge = np.mean([rouge_l(r, h) for r, h in zip(refs, hyps)])
+                    cider_val = light_cider(refs, hyps)
+                    spice_val = light_spice(refs, hyps)
+                    dist2 = distinct_n(hyps, n=2)
+                    sbleu = self_bleu(hyps)
+                    clip_score_val = clipscore(clip_model_a, clip_proc_a, hyps, imgs)
+
+                    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+                    c1.metric("BLEU", f"{bleu:.3f}")
+                    c2.metric("ROUGE-L", f"{rouge:.3f}")
+                    c3.metric("CIDEr (light)", f"{cider_val:.3f}")
+                    c4.metric("SPICE (light)", f"{spice_val:.3f}")
+                    c5.metric("Distinct-2", f"{dist2:.3f}")
+                    c6.metric("Self-BLEU", f"{sbleu:.3f}")
+                    c7.metric("CLIPScore", f"{clip_score_val:.3f}")
+
+                    st.markdown("### 🧑‍⚖️ Human Evaluation")
+                    ratings = []
+                    for idx, (img, ref, hyp) in enumerate(zip(imgs, refs, hyps)):
+                        st.image(img, width=150)
+                        st.write(f"**Reference:** {ref}\n**Hypothesis:** {hyp}")
+                        rating = st.slider("Оценка (1–5)", 1, 5, 3, key=f"rate_{idx}")
+                        ratings.append({"ref": ref, "hyp": hyp, "rating": int(rating)})
+                    if st.button("Сохранить оценки"):
+                        add_mm_history({"type": "human_eval", "ratings": ratings, "timestamp": pd.Timestamp.now().isoformat()})
+                        st.success("Оценки сохранены в историю")
 
     # ===================== 2) CLIP Retrieval (Text→Image) =====================
-    with st.expander("📦 Retrieval (CLIP / SigLIP)"):
+    with st.expander("📦 CLIP Retrieval"):
         csv_file = st.file_uploader("CSV (text,image)", type=["csv"], key="mm_clip_csv")
         zip_file = st.file_uploader("ZIP images", type=["zip"], key="mm_clip_zip")
+        n_boot = st.slider("Бутстрэп итераций", 100, 800, 300, 50)
 
         if csv_file and zip_file:
             df_pairs = pd.read_csv(csv_file)
@@ -719,28 +856,82 @@ elif mode == "Работа с мультимодальными моделями"
 
                 if imgs:
                     with torch.no_grad():
-                        t_emb = mm.encode_texts(clip_model_a, clip_proc_a, texts)
-                        i_emb = mm.encode_images(clip_model_a, clip_proc_a, imgs)
-
-                    sim_a = mm.cosine_similarity_batch(t_emb, i_emb)
+                        t_emb = clip_model_a.get_text_features(**clip_proc_a(text=texts, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
+                        i_emb = clip_model_a.get_image_features(**clip_proc_a(images=imgs, return_tensors="pt")).cpu().numpy()
+                    sim_a = _cosine_sim(t_emb, i_emb)
 
                     r1, r5, r10 = recall_at_k(sim_a, 1), recall_at_k(sim_a, 5), recall_at_k(sim_a, 10)
-                    prec5, mrr_val = precision_at_k(sim_a, 5), mrr(sim_a)
+                    map_score, ndcg_score, med_rank = mean_average_precision(sim_a), ndcg(sim_a), median_rank(sim_a)
 
-                    st.subheader("Метрики Retrieval")
-                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1, c2, c3, c4, c5, c6 = st.columns(6)
                     c1.metric("R@1", f"{r1:.3f}")
                     c2.metric("R@5", f"{r5:.3f}")
                     c3.metric("R@10", f"{r10:.3f}")
-                    c4.metric("P@5", f"{prec5:.3f}")
-                    c5.metric("MRR", f"{mrr_val:.3f}")
+                    c4.metric("mAP", f"{map_score:.3f}")
+                    c5.metric("nDCG@10", f"{ndcg_score:.3f}")
+                    c6.metric("Median Rank", f"{med_rank:.1f}")
 
-                    # Визуализация эмбеддингов
-                    emb_df = umap_projection(t_emb, i_emb)
-                    chart = alt.Chart(emb_df).mark_circle(size=60).encode(
-                        x="x", y="y", color="type", tooltip=["type"]
-                    ).interactive()
-                    st.altair_chart(chart, use_container_width=True)
+                    ks = list(range(1, min(21, sim_a.shape[1] + 1)))
+                    curve = pd.DataFrame({"k": ks, "Recall@k": [recall_at_k(sim_a, k) for k in ks]})
+                    st.line_chart(curve.set_index("k"))
+
+                    sim_sym = sim_a.T
+                    r1_img = recall_at_k(sim_sym, 1)
+                    st.caption(f"Image→Text R@1: {r1_img:.3f}")
+
+                    # ======== A/B сравнение и распределения бутстрэпа ========
+                    if clip_model_b is not None:
+                        with torch.no_grad():
+                            t_emb_b = clip_model_b.get_text_features(**clip_proc_b(text=texts, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
+                            i_emb_b = clip_model_b.get_image_features(**clip_proc_b(images=imgs, return_tensors="pt")).cpu().numpy()
+                        sim_b = _cosine_sim(t_emb_b, i_emb_b)
+
+                        diffs_r1 = bootstrap_metric_diff(sim_a.shape[0], recall_at_k, sim_a, sim_b, iters=n_boot, k=1)
+                        diffs_map = bootstrap_metric_diff(sim_a.shape[0], mean_average_precision, sim_a, sim_b, iters=n_boot)
+                        diffs_ndcg = bootstrap_metric_diff(sim_a.shape[0], ndcg, sim_a, sim_b, iters=n_boot, k=10)
+
+                        # Метрики разниц (средние)
+                        m_r1, m_map, m_ndcg = float(np.mean(diffs_r1)), float(np.mean(diffs_map)), float(np.mean(diffs_ndcg))
+                        d1, d2, d3 = st.columns(3)
+                        d1.metric("ΔR@1 (B−A)", f"{m_r1:+.3f}")
+                        d2.metric("ΔmAP (B−A)", f"{m_map:+.3f}")
+                        d3.metric("ΔnDCG@10 (B−A)", f"{m_ndcg:+.3f}")
+
+                        # Подготовка данных
+                        df_boot = pd.DataFrame({
+                            "ΔR@1": diffs_r1,
+                            "ΔmAP": diffs_map,
+                            "ΔnDCG@10": diffs_ndcg
+                        })
+                        df_long = df_boot.melt(var_name="metric", value_name="delta")
+
+                        # Гистограммы Altair для каждого метрика
+                        cols = st.columns(3)
+                        for col_idx, metric_name in enumerate(["ΔR@1", "ΔmAP", "ΔnDCG@10"]):
+                            chart = alt.Chart(df_boot[[metric_name]].rename(columns={metric_name:"delta"})).mark_bar().encode(
+                                x=alt.X("delta:Q", bin=alt.Bin(maxbins=40), title=metric_name),
+                                y=alt.Y("count():Q", title="Count")
+                            ).properties(height=200)
+                            cols[col_idx].altair_chart(chart, use_container_width=True)
+
+                        # Экспорт CSV
+                        csv_bytes = df_long.to_csv(index=False).encode("utf-8")
+                        st.download_button("Скачать распределения бутстрэпа (CSV)", data=csv_bytes, file_name="ab_bootstrap_distributions.csv", mime="text/csv")
+
+                        # Экспорт PNG (матплотлиб)
+                        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                        axes[0].hist(diffs_r1, bins=30)
+                        axes[0].set_title("ΔR@1")
+                        axes[1].hist(diffs_map, bins=30)
+                        axes[1].set_title("ΔmAP")
+                        axes[2].hist(diffs_ndcg, bins=30)
+                        axes[2].set_title("ΔnDCG@10")
+                        for ax in axes:
+                            ax.grid(True, linestyle=":", alpha=0.4)
+                        fig.tight_layout()
+                        png_buf = io.BytesIO()
+                        fig.savefig(png_buf, format="png", dpi=150)
+                        st.download_button("Скачать гистограммы (PNG)", data=png_buf.getvalue(), file_name="ab_bootstrap_hist.png", mime="image/png")
 
     # ===================== История =====================
     if st.session_state["mm_history"]:

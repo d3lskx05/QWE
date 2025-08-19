@@ -1,0 +1,3 @@
+BLIP → BLEU/ROUGE/Light-CIDEr/SPICE, опционально BERTScore.
+
+CLIP → Recall@K, mAP, nDCG, A/B тест.

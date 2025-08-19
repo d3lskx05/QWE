@@ -1,86 +1,98 @@
-import numpy as np
+"""
+Модуль для мультимодальных моделей (текст + изображение).
+Поддержка: CLIP (text↔image), BLIP (image→caption).
+Теперь добавлена возможность выбирать источник (HF или Google Drive).
+"""
+
+import streamlit as st
 import torch
+from typing import List
+from PIL import Image
+import numpy as np
 from transformers import (
     CLIPProcessor, CLIPModel,
-    AutoProcessor, AutoModel,
     BlipProcessor, BlipForConditionalGeneration
 )
-
-# ===================== CLIP / SigLIP =====================
-def load_clip_model(provider: str, model_id: str):
-    """
-    Загрузка CLIP/SigLIP модели.
-    """
-    try:
-        model = CLIPModel.from_pretrained(model_id)
-        processor = CLIPProcessor.from_pretrained(model_id)
-        return model, processor
-    except Exception:
-        model = AutoModel.from_pretrained(model_id)
-        processor = AutoProcessor.from_pretrained(model_id)
-        return model, processor
+from utils import download_file_from_gdrive
 
 
-def encode_texts(model, processor, texts):
+# ================== Вспомогательная функция ==================
+def _resolve_model_path(source: str, identifier: str) -> str:
     """
-    Текст → эмбеддинги CLIP/SigLIP
+    Возвращает путь или идентификатор модели для from_pretrained:
+      - huggingface -> строка (ID)
+      - google_drive -> локальный путь к извлеченной папке
     """
-    inputs = processor(text=texts, return_tensors="pt", padding=True, truncation=True)
-    with torch.no_grad():
-        out = model.get_text_features(**inputs)
-    return out.cpu().numpy()
-
-
-def encode_images(model, processor, images):
-    """
-    Картинки → эмбеддинги CLIP/SigLIP
-    """
-    inputs = processor(images=images, return_tensors="pt")
-    with torch.no_grad():
-        out = model.get_image_features(**inputs)
-    return out.cpu().numpy()
-
-# ===================== BLIP / BLIP-2 =====================
-def load_blip_model(provider: str, model_id: str):
-    """
-    Загрузка BLIP или BLIP-2 модели.
-    """
-    if "blip2" in model_id.lower():
-        try:
-            from transformers import Blip2Processor, Blip2ForConditionalGeneration
-            model = Blip2ForConditionalGeneration.from_pretrained(model_id)
-            processor = Blip2Processor.from_pretrained(model_id)
-        except Exception:
-            raise ImportError("Для BLIP-2 нужна версия transformers >= 4.39")
+    if source == "huggingface":
+        return identifier
+    elif source == "google_drive":
+        return download_file_from_gdrive(identifier)
     else:
-        model = BlipForConditionalGeneration.from_pretrained(model_id)
-        processor = BlipProcessor.from_pretrained(model_id)
+        raise ValueError(f"Неизвестный источник модели: {source}")
+
+
+# ================== CLIP ==================
+@st.cache_resource(show_spinner=False)
+def load_clip_model(source: str = "huggingface", model_id: str = "openai/clip-vit-base-patch32"):
+    """
+    Загрузка CLIP модели с выбором источника.
+    source: huggingface | google_drive
+    model_id: ID модели или File ID на Google Drive
+    """
+    model_path = _resolve_model_path(source, model_id)
+    model = CLIPModel.from_pretrained(model_path)
+    processor = CLIPProcessor.from_pretrained(model_path)
     return model, processor
 
 
-def generate_caption(model, processor, image):
-    """
-    Сгенерировать подпись к картинке через BLIP/BLIP-2
-    """
-    inputs = processor(images=image, return_tensors="pt")
+def encode_texts(model, processor, texts: List[str]) -> np.ndarray:
+    """Эмбеддинги текстов CLIP."""
+    inputs = processor(text=texts, return_tensors="pt", padding=True, truncation=True)
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=30)
-    return processor.decode(out[0], skip_special_tokens=True)
+        text_embs = model.get_text_features(**inputs)
+    return text_embs.cpu().numpy()
 
-# ===================== Similarity =====================
+
+def encode_images(model, processor, images: List[Image.Image]) -> np.ndarray:
+    """Эмбеддинги изображений CLIP."""
+    inputs = processor(images=images, return_tensors="pt")
+    with torch.no_grad():
+        image_embs = model.get_image_features(**inputs)
+    return image_embs.cpu().numpy()
+
+
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """
-    Косинусное сходство для двух векторов
-    """
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+    """Косинусное сходство между двумя векторами."""
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+    return float(np.dot(a, b))
 
 
-def cosine_similarity_batch(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def check_text_image_pair(model, processor, text: str, image: Image.Image) -> float:
+    """Сходство между текстом и изображением через CLIP."""
+    text_emb = encode_texts(model, processor, [text])[0]
+    image_emb = encode_images(model, processor, [image])[0]
+    return cosine_similarity(text_emb, image_emb)
+
+
+# ================== BLIP ==================
+@st.cache_resource(show_spinner=False)
+def load_blip_model(source: str = "huggingface", model_id: str = "Salesforce/blip-image-captioning-base"):
     """
-    Косинусное сходство для матриц эмбеддингов (батч).
-    a: (N, D), b: (M, D)
-    return: (N, M)
+    Загрузка BLIP для генерации описаний картинок.
+    source: huggingface | google_drive
+    model_id: ID модели или File ID на Google Drive
     """
-    a_norm = a / np.linalg.norm(a, axis=1, keepdims=True)
-    b_norm = b / np.linalg.norm(b, axis=1, keepdims=True)
-    return np.matmul(a_norm, b_norm.T)
+    model_path = _resolve_model_path(source, model_id)
+    model = BlipForConditionalGeneration.from_pretrained(model_path)
+    processor = BlipProcessor.from_pretrained(model_path)
+    return model, processor
+
+
+def generate_caption(model, processor, image: Image.Image, max_length: int = 30) -> str:
+    """Генерация описания картинки через BLIP."""
+    inputs = processor(image, return_tensors="pt")
+    with torch.no_grad():
+        out = model.generate(**inputs, max_length=max_length)
+    caption = processor.decode(out[0], skip_special_tokens=True)
+    return caption
