@@ -18,10 +18,15 @@ def batch_infer(model, processor, inputs, batch_size=16, mode="text"):
     return np.vstack(outputs)
 
 # ===================== Retrieval Metrics =====================
-def precision_at_k(sim_matrix, k):
+def precision_at_k(sim_matrix, k=5):
     ranks = np.argsort(-sim_matrix, axis=1)
     precs = [(1 if i in ranks[i, :k] else 0) for i in range(sim_matrix.shape[0])]
     return np.mean(precs)
+
+def recall_at_k(sim_matrix, k=5):
+    ranks = np.argsort(-sim_matrix, axis=1)
+    recs = [(1 if i in ranks[i, :k] else 0) for i in range(sim_matrix.shape[0])]
+    return np.mean(recs)
 
 def mrr(sim_matrix):
     ranks = np.argsort(-sim_matrix, axis=1)
@@ -33,7 +38,7 @@ def mrr(sim_matrix):
 
 # ===================== Embedding Visualization =====================
 def umap_projection(t_emb, i_emb, n_neighbors=10, min_dist=0.1):
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric="cosine")
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric="cosine", random_state=42)
     emb_2d = reducer.fit_transform(np.vstack([t_emb, i_emb]))
     labels = ["text"] * len(t_emb) + ["image"] * len(i_emb)
     return pd.DataFrame({"x": emb_2d[:, 0], "y": emb_2d[:, 1], "type": labels})
