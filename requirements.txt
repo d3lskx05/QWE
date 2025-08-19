@@ -19,3 +19,4 @@ pymorphy2>=0.9.1
 scikit-learn>=1.3.0
 gdown
 matplotlib
+umap
