@@ -625,62 +625,113 @@ if mode == "Работа с текстовыми моделями":
 
 # ===================== РЕЖИМ: МУЛЬТИМОДАЛЬНЫЕ МОДЕЛИ =====================
 elif mode == "Работа с мультимодальными моделями":
+    # ===================== РЕЖИМ: МУЛЬТИМОДАЛЬНЫЕ МОДЕЛИ =====================
+    import io, json, zipfile
+    from typing import List, Optional, Dict
+    import numpy as np
+    import pandas as pd
+    import streamlit as st
+    from PIL import Image
+
+    # Используем твой модуль загрузки моделей (без конфликтов с текстовым анализом)
+    from multimodal import load_blip_model, load_clip_model, generate_caption
+
+    # Внешние библиотеки (по возможности graceful)
+    try:
+        import torch
+    except Exception:
+        torch = None
+    try:
+        import altair as alt
+    except Exception:
+        alt = None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        plt = None
+    try:
+        from openai import OpenAI  # OpenAI SDK >=1.0
+    except Exception:
+        OpenAI = None
+
     st.header("🖼️ Продвинутая мультимодальная аналитика")
 
     # ===================== История =====================
     if "mm_history" not in st.session_state:
         st.session_state["mm_history"] = []
 
-    def add_mm_history(record: dict):
+    def mm_add_history(record: Dict):
         st.session_state["mm_history"].append(record)
         if len(st.session_state["mm_history"]) > 300:
             st.session_state["mm_history"] = st.session_state["mm_history"][-300:]
 
+    # ===================== Боковая панель: настройки =====================
     st.sidebar.header("Настройки мультимодальных моделей")
 
-    # ===================== Выбор и загрузка моделей =====================
-    clip_source = st.sidebar.selectbox("Источник CLIP (A)", ["huggingface", "google_drive"], index=0)
-    clip_id = st.sidebar.text_input("CLIP (A) Model ID", value="openai/clip-vit-base-patch32")
+    # Источник и ID моделей (оставляем как у тебя)
+    clip_source_a = st.sidebar.selectbox("Источник CLIP (A)", ["huggingface", "google_drive"], index=0, key="mm_clip_source_a")
+    clip_id_a = st.sidebar.text_input("CLIP (A) Model ID", value="openai/clip-vit-base-patch32", key="mm_clip_id_a")
 
-    enable_mm_ab = st.sidebar.checkbox("A/B тест: вторая CLIP (B)", value=False)
-    if enable_mm_ab:
-        clip_source_b = st.sidebar.selectbox("Источник CLIP (B)", ["huggingface", "google_drive"], index=0)
-        clip_id_b = st.sidebar.text_input("CLIP (B) Model ID", value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K")
+    enable_ab = st.sidebar.checkbox("A/B: Включить CLIP (B)", value=False, key="mm_enable_ab")
+    if enable_ab:
+        clip_source_b = st.sidebar.selectbox("Источник CLIP (B)", ["huggingface", "google_drive"], index=0, key="mm_clip_source_b")
+        clip_id_b = st.sidebar.text_input("CLIP (B) Model ID", value="laion/CLIP-ViT-B-32-laion2B-s34B-b79K", key="mm_clip_id_b")
     else:
         clip_source_b, clip_id_b = None, None
 
-    blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0)
-    blip_id = st.sidebar.text_input("BLIP Model ID", value="Salesforce/blip-image-captioning-base")
+    blip_source = st.sidebar.selectbox("Источник BLIP", ["huggingface", "google_drive"], index=0, key="mm_blip_source")
+    blip_caption_id = st.sidebar.text_input("BLIP Caption Model ID", value="Salesforce/blip-image-captioning-base", key="mm_blip_caption_id")
+    blip_vqa_id = st.sidebar.text_input("BLIP VQA Model ID", value="Salesforce/blip-vqa-base", key="mm_blip_vqa_id")
 
-    from multimodal import load_blip_model, load_clip_model, generate_caption
-    from PIL import Image
-    import pandas as pd, numpy as np, torch, io, zipfile, altair as alt
-    from sklearn.metrics import average_precision_score
-    import matplotlib.pyplot as plt
+    # LLM-оценка (опционально)
+    use_llm_eval = st.sidebar.checkbox("LLM-оценка (OpenAI-совместимый API)", value=False, key="mm_use_llm")
+    if use_llm_eval:
+        llm_api_key = st.sidebar.text_input("API Key", type="password", key="mm_llm_key")
+        llm_api_base = st.sidebar.text_input("API Base (опционально)", key="mm_llm_base")
+        llm_model_name = st.sidebar.text_input("Модель (LLM)", value="gpt-4o-mini", key="mm_llm_model")
+    else:
+        llm_api_key = llm_api_base = llm_model_name = None
 
-    # ===================== Загрузка моделей =====================
-    clip_model_a, clip_proc_a = load_clip_model(clip_source, clip_id)
-    clip_model_b, clip_proc_b = None, None
-    if enable_mm_ab and clip_id_b:
-        clip_model_b, clip_proc_b = load_clip_model(clip_source_b, clip_id_b)
+    # ===================== Кеш-загрузка моделей =====================
+    @st.cache_resource(show_spinner=False)
+    def mm_load_clip(source: str, model_id: str):
+        try:
+            model, proc = load_clip_model(source, model_id)
+            return model, proc
+        except Exception as e:
+            st.warning(f"Не удалось загрузить CLIP {model_id}: {e}")
+            return None, None
 
-    blip_model, blip_proc = load_blip_model(blip_source, blip_id)
+    @st.cache_resource(show_spinner=False)
+    def mm_load_blip(source: str, model_id: str):
+        try:
+            model, proc = load_blip_model(source, model_id)
+            return model, proc
+        except Exception as e:
+            st.warning(f"Не удалось загрузить BLIP {model_id}: {e}")
+            return None, None
 
-    # ===================== Метрики Captioning =====================
-    def _ngrams(tokens, n):
+    clip_model_a, clip_proc_a = mm_load_clip(clip_source_a, clip_id_a)
+    clip_model_b, clip_proc_b = (mm_load_clip(clip_source_b, clip_id_b) if (enable_ab and clip_id_b) else (None, None))
+    blip_cap_model, blip_cap_proc = mm_load_blip(blip_source, blip_caption_id)
+    blip_vqa_model, blip_vqa_proc = mm_load_blip(blip_source, blip_vqa_id)
+
+    # ===================== Метрики и утилиты (префикс mm_ для изоляции) =====================
+    def mm_ngrams(tokens: List[str], n: int):
         return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
 
-    def bleu_n(ref, hyp, n=4):
+    def mm_bleu_n(ref: str, hyp: str, n: int = 4) -> float:
         ref_t, hyp_t = ref.lower().split(), hyp.lower().split()
         if not hyp_t:
             return 0.0
         score = 0.0
         for k in range(1, n+1):
-            ref_ngr, hyp_ngr = _ngrams(ref_t, k), _ngrams(hyp_t, k)
-            score += len(ref_ngr & hyp_ngr) / max(len(hyp_ngr), 1)
+            ref_ngr, hyp_ngr = mm_ngrams(ref_t, k), mm_ngrams(hyp_t, k)
+            denom = max(len(hyp_ngr), 1)
+            score += len(ref_ngr & hyp_ngr) / denom
         return score / n
 
-    def rouge_l(ref, hyp):
+    def mm_rouge_l(ref: str, hyp: str) -> float:
         ref_t, hyp_t = ref.lower().split(), hyp.lower().split()
         dp = [[0]*(len(hyp_t)+1) for _ in range(len(ref_t)+1)]
         for i in range(1, len(ref_t)+1):
@@ -691,71 +742,84 @@ elif mode == "Работа с мультимодальными моделями"
                     dp[i][j] = max(dp[i-1][j], dp[i][j-1])
         return dp[-1][-1] / max(len(ref_t), 1)
 
-    def light_cider(refs, hyps, n_max=4):
-        scores = []
-        for r, h in zip(refs, hyps):
-            r_t, h_t = r.lower().split(), h.lower().split()
-            if not h_t: scores.append(0.0); continue
-            s = 0.0
-            for n in range(1, n_max+1):
-                r_ngr, h_ngr = _ngrams(r_t, n), _ngrams(h_t, n)
-                s += len(r_ngr & h_ngr) / max(len(h_ngr), 1)
-            scores.append(s/n_max)
-        return float(np.mean(scores)) if scores else 0.0
-
-    def light_spice(refs, hyps):
-        scores = []
-        for r, h in zip(refs, hyps):
-            scores.append(len(set(r.lower().split()) & set(h.lower().split())) / max(len(h.split()), 1))
-        return float(np.mean(scores)) if scores else 0.0
-
-    def distinct_n(hyps, n=2):
+    def mm_distinct_n(hyps: List[str], n: int = 2) -> float:
         ngrams = []
         for h in hyps:
-            tokens = h.lower().split()
-            ngrams.extend([tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)])
+            t = h.lower().split()
+            ngrams.extend([tuple(t[i:i+n]) for i in range(len(t)-n+1)])
         return len(set(ngrams)) / max(len(ngrams), 1)
 
-    def self_bleu(hyps, n=4):
+    def mm_self_bleu(hyps: List[str], n: int = 4) -> float:
         scores = []
         for i, h in enumerate(hyps):
             others = hyps[:i] + hyps[i+1:]
             if not others:
                 continue
             ref = " ".join(others)
-            scores.append(bleu_n(ref, h, n=n))
+            scores.append(mm_bleu_n(ref, h, n=n))
         return float(np.mean(scores)) if scores else 0.0
 
-    # CLIPScore для captioning
-    def clipscore(clip_model, clip_proc, hyps, imgs):
+    def mm_light_cider(refs: List[str], hyps: List[str], n_max: int = 4) -> float:
+        scores = []
+        for r, h in zip(refs, hyps):
+            r_t, h_t = r.lower().split(), h.lower().split()
+            if not h_t:
+                scores.append(0.0); continue
+            s = 0.0
+            for n in range(1, n_max+1):
+                r_ngr, h_ngr = mm_ngrams(r_t, n), mm_ngrams(h_t, n)
+                s += len(r_ngr & h_ngr) / max(len(h_ngr), 1)
+            scores.append(s/n_max)
+        return float(np.mean(scores)) if scores else 0.0
+
+    def mm_light_spice(refs: List[str], hyps: List[str]) -> float:
+        scores = []
+        for r, h in zip(refs, hyps):
+            scores.append(len(set(r.lower().split()) & set(h.lower().split())) / max(len(h.split()), 1))
+        return float(np.mean(scores)) if scores else 0.0
+
+    def mm_normalize(mat: np.ndarray) -> np.ndarray:
+        return mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12)
+
+    def mm_cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        return mm_normalize(a) @ mm_normalize(b).T
+
+    def mm_clipscore(clip_model, clip_proc, hyps: List[str], imgs: List[Image.Image]) -> float:
+        if clip_model is None or clip_proc is None or not hyps or not imgs or torch is None:
+            return 0.0
         with torch.no_grad():
-            inputs_t = clip_proc(text=hyps, return_tensors="pt", padding=True, truncation=True)
-            t_emb = clip_model.get_text_features(**inputs_t).cpu().numpy()
-            inputs_i = clip_proc(images=imgs, return_tensors="pt")
-            i_emb = clip_model.get_image_features(**inputs_i).cpu().numpy()
-        sim = (t_emb / np.linalg.norm(t_emb, axis=1, keepdims=True)) @ (i_emb / np.linalg.norm(i_emb, axis=1, keepdims=True)).T
+            t = clip_model.get_text_features(**clip_proc(text=hyps, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
+            i = clip_model.get_image_features(**clip_proc(images=imgs, return_tensors="pt")).cpu().numpy()
+        sim = mm_cosine_sim(t, i)
         return float(np.mean(np.diag(sim)))
 
-    # ===================== Метрики Retrieval =====================
-    def _cosine_sim(a, b):
-        a = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
-        b = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
-        return a @ b.T
-
-    def recall_at_k(sim_matrix, k):
+    def mm_recall_at_k(sim_matrix: np.ndarray, k: int) -> float:
         ranks = np.argsort(-sim_matrix, axis=1)
         hits = sum(1 if i in ranks[i, :k] else 0 for i in range(sim_matrix.shape[0]))
-        return hits / sim_matrix.shape[0]
+        return hits / sim_matrix.shape[0] if sim_matrix.size else 0.0
 
-    def mean_average_precision(sim_matrix):
+    def mm_mean_average_precision(sim_matrix: np.ndarray) -> float:
+        if sim_matrix.size == 0:
+            return 0.0
         y_true = np.eye(sim_matrix.shape[0])
         aps = []
         for i in range(sim_matrix.shape[0]):
-            aps.append(average_precision_score(y_true[i], sim_matrix[i]))
-        return np.mean(aps)
+            y = y_true[i]
+            scores = sim_matrix[i]
+            order = np.argsort(-scores)
+            y_sorted = y[order]
+            prec, hit = [], 0
+            for j, rel in enumerate(y_sorted, start=1):
+                if rel > 0:
+                    hit += 1
+                    prec.append(hit / j)
+            aps.append(np.mean(prec) if prec else 0.0)
+        return float(np.mean(aps))
 
-    def ndcg(sim_matrix, k=10):
+    def mm_ndcg(sim_matrix: np.ndarray, k: int = 10) -> float:
         n = sim_matrix.shape[0]
+        if n == 0:
+            return 0.0
         ndcgs = []
         for i in range(n):
             scores = sim_matrix[i]
@@ -764,190 +828,459 @@ elif mode == "Работа с мультимодальными моделями"
             discounts = [1/np.log2(r+2) for r in range(len(gains))]
             dcg = sum(g * d for g, d in zip(gains, discounts))
             ndcgs.append(dcg/1.0)
-        return np.mean(ndcgs)
+        return float(np.mean(ndcgs)) if ndcgs else 0.0
 
-    def median_rank(sim_matrix):
+    def mm_median_rank(sim_matrix: np.ndarray) -> float:
+        if sim_matrix.size == 0:
+            return 0.0
         ranks = np.argsort(-sim_matrix, axis=1)
-        positions = [np.where(ranks[i] == i)[0][0] + 1 for i in range(sim_matrix.shape[0])]
-        return np.median(positions)
+        positions = [int(np.where(ranks[i] == i)[0][0]) + 1 for i in range(sim_matrix.shape[0])]
+        return float(np.median(positions)) if positions else 0.0
 
-    def bootstrap_metric_diff(rows, metric_fn, sim_a, sim_b, iters=300, k=None):
-        rng = np.random.default_rng(42)
+    def mm_bootstrap_metric_diff(rows: int, metric_fn, sim_a: np.ndarray, sim_b: np.ndarray, iters: int = 300, k: Optional[int] = None, seed: int = 42):
+        rng = np.random.default_rng(seed)
         diffs = []
         for _ in range(iters):
             idx = rng.integers(0, rows, size=rows)
             sa, sb = sim_a[idx][:, idx], sim_b[idx][:, idx]
-            if metric_fn is recall_at_k:
-                diffs.append(metric_fn(sb, k) - metric_fn(sa, k))
-            elif metric_fn is ndcg:
+            if metric_fn in (mm_recall_at_k, mm_ndcg):
                 diffs.append(metric_fn(sb, k) - metric_fn(sa, k))
             else:
                 diffs.append(metric_fn(sb) - metric_fn(sa))
         return np.array(diffs)
 
-    # ===================== 1) BLIP Caption Evaluation =====================
-    with st.expander("📊 Оценка BLIP Caption"):
-        csv_blip = st.file_uploader("CSV (image, reference_caption)", type=["csv"], key="blip_eval_csv")
-        zip_blip = st.file_uploader("ZIP images", type=["zip"], key="blip_eval_zip")
+    # Приближённый CLIP-FID (в CLIP-пространстве)
+    def mm_frechet_distance(mu1, sigma1, mu2, sigma2):
+        try:
+            from scipy import linalg
+            covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+            if np.iscomplexobj(covmean):
+                covmean = covmean.real
+            diff = mu1 - mu2
+            return diff.dot(diff) + np.trace(sigma1 + sigma2 - 2*covmean)
+        except Exception:
+            diff = mu1 - mu2
+            return diff.dot(diff) + np.sum(sigma1 + sigma2 - 2*np.sqrt(np.maximum(sigma1 * sigma2, 1e-12)))
 
-        if csv_blip and zip_blip:
-            df_ref = pd.read_csv(csv_blip)
-            zbytes = io.BytesIO(zip_blip.read())
-            with zipfile.ZipFile(zbytes) as zf:
-                refs, hyps, imgs = [], [], []
-                for _, row in df_ref.iterrows():
-                    fname, ref = str(row["image"]), str(row["reference_caption"])
-                    if fname not in zf.namelist():
-                        st.warning(f"Нет файла в ZIP: {fname}")
-                        continue
-                    with zf.open(fname) as f:
-                        img = Image.open(io.BytesIO(f.read())).convert("RGB")
-                    hyp = generate_caption(blip_model, blip_proc, img)
-                    refs.append(ref); hyps.append(hyp); imgs.append(img)
+    def mm_clip_fid(clip_model, clip_proc, real_imgs: List[Image.Image], gen_imgs: List[Image.Image]) -> float:
+        if clip_model is None or clip_proc is None or torch is None or not real_imgs or not gen_imgs:
+            return 0.0
+        with torch.no_grad():
+            real = clip_model.get_image_features(**clip_proc(images=real_imgs, return_tensors="pt")).cpu().numpy()
+            gen = clip_model.get_image_features(**clip_proc(images=gen_imgs, return_tensors="pt")).cpu().numpy()
+        mu_r, mu_g = real.mean(axis=0), gen.mean(axis=0)
+        cov_r, cov_g = np.cov(real, rowvar=False), np.cov(gen, rowvar=False)
+        return float(mm_frechet_distance(mu_r, cov_r, mu_g, cov_g))
+
+    # Генерация BLIP (caption) и простой VQA-вызов
+    def mm_blip_generate_caption(model, proc, img: Image.Image, max_new_tokens: int = 30) -> str:
+        try:
+            return generate_caption(model, proc, img)
+        except Exception:
+            # Фоллбэк через .generate (если доступно)
+            if model is None or proc is None or torch is None:
+                return ""
+            inputs = proc(images=img, text="A photo of", return_tensors="pt")
+            with torch.no_grad():
+                out = model.generate(**inputs, max_new_tokens=max_new_tokens)
+            try:
+                return proc.batch_decode(out, skip_special_tokens=True)[0]
+            except Exception:
+                return ""
+
+    def mm_blip_vqa_answer(model, proc, img: Image.Image, question: str, max_new_tokens: int = 20) -> str:
+        if model is None or proc is None or torch is None:
+            return ""
+        inputs = proc(images=img, text=question, return_tensors="pt")
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        try:
+            return proc.batch_decode(out, skip_special_tokens=True)[0]
+        except Exception:
+            return ""
+
+    # ===================== Вкладки =====================
+    tab_cap, tab_ret, tab_gen, tab_vqa, tab_hist = st.tabs(
+        ["🖼️ Caption Eval", "🔎 Retrieval Eval", "🎨 ImageGen Eval", "❓ VQA Eval", "🗂️ История"]
+    )
+
+    # ===================== 1) Caption Evaluation =====================
+    with tab_cap:
+        st.subheader("🖼️ Оценка Captioning")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            csv_cap = st.file_uploader("CSV (image, reference_caption)", type=["csv"], key="mm_cap_csv")
+        with c2:
+            zip_cap = st.file_uploader("ZIP images", type=["zip"], key="mm_cap_zip")
+        with c3:
+            do_generate = st.checkbox("Генерировать BLIP подписи", value=True, key="mm_cap_gen")
+
+        if st.button("Запустить Caption Eval", type="primary", key="mm_cap_run"):
+            if not (csv_cap and zip_cap):
+                st.warning("Загрузите CSV и ZIP с изображениями.")
+            else:
+                df = pd.read_csv(csv_cap)
+                zbytes = io.BytesIO(zip_cap.read())
+                with zipfile.ZipFile(zbytes) as zf:
+                    refs, hyps, imgs = [], [], []
+                    for _, row in df.iterrows():
+                        fname = str(row.get("image", ""))
+                        ref = str(row.get("reference_caption", ""))
+                        if not fname or fname not in zf.namelist():
+                            st.warning(f"Нет файла в ZIP: {fname}")
+                            continue
+                        with zf.open(fname) as f:
+                            img = Image.open(io.BytesIO(f.read())).convert("RGB")
+                        hyp = mm_blip_generate_caption(blip_cap_model, blip_cap_proc, img) if do_generate else ref
+                        refs.append(ref); hyps.append(hyp); imgs.append(img)
 
                 if refs:
-                    bleu = np.mean([bleu_n(r, h) for r, h in zip(refs, hyps)])
-                    rouge = np.mean([rouge_l(r, h) for r, h in zip(refs, hyps)])
-                    cider_val = light_cider(refs, hyps)
-                    spice_val = light_spice(refs, hyps)
-                    dist2 = distinct_n(hyps, n=2)
-                    sbleu = self_bleu(hyps)
-                    clip_score_val = clipscore(clip_model_a, clip_proc_a, hyps, imgs)
+                    bleu = float(np.mean([mm_bleu_n(r, h) for r, h in zip(refs, hyps)]))
+                    rouge = float(np.mean([mm_rouge_l(r, h) for r, h in zip(refs, hyps)]))
+                    cider_val = mm_light_cider(refs, hyps)
+                    spice_val = mm_light_spice(refs, hyps)
+                    dist2 = mm_distinct_n(hyps, n=2)
+                    sbleu = mm_self_bleu(hyps)
+                    clip_score_val = mm_clipscore(clip_model_a, clip_proc_a, hyps, imgs)
 
-                    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-                    c1.metric("BLEU", f"{bleu:.3f}")
-                    c2.metric("ROUGE-L", f"{rouge:.3f}")
-                    c3.metric("CIDEr (light)", f"{cider_val:.3f}")
-                    c4.metric("SPICE (light)", f"{spice_val:.3f}")
-                    c5.metric("Distinct-2", f"{dist2:.3f}")
-                    c6.metric("Self-BLEU", f"{sbleu:.3f}")
-                    c7.metric("CLIPScore", f"{clip_score_val:.3f}")
+                    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+                    m1.metric("BLEU", f"{bleu:.3f}")
+                    m2.metric("ROUGE-L", f"{rouge:.3f}")
+                    m3.metric("CIDEr (light)", f"{cider_val:.3f}")
+                    m4.metric("SPICE (light)", f"{spice_val:.3f}")
+                    m5.metric("Distinct-2", f"{dist2:.3f}")
+                    m6.metric("Self-BLEU", f"{sbleu:.3f}")
+                    m7.metric("CLIPScore", f"{clip_score_val:.3f}")
 
-                    st.markdown("### 🧑‍⚖️ Human Evaluation")
-                    ratings = []
-                    for idx, (img, ref, hyp) in enumerate(zip(imgs, refs, hyps)):
-                        st.image(img, width=150)
-                        st.write(f"**Reference:** {ref}\n**Hypothesis:** {hyp}")
-                        rating = st.slider("Оценка (1–5)", 1, 5, 3, key=f"rate_{idx}")
-                        ratings.append({"ref": ref, "hyp": hyp, "rating": int(rating)})
-                    if st.button("Сохранить оценки"):
-                        add_mm_history({"type": "human_eval", "ratings": ratings, "timestamp": pd.Timestamp.now().isoformat()})
-                        st.success("Оценки сохранены в историю")
+                    # Опциональная LLM-оценка нескольких примеров
+                    llm_judgements = []
+                    if use_llm_eval and llm_api_key and OpenAI is not None:
+                        try:
+                            client = OpenAI(api_key=llm_api_key, base_url=llm_api_base or None)
+                            max_items = min(12, len(refs))
+                            with st.expander("🤖 LLM-оценка примеров (до 12)"):
+                                for i in range(max_items):
+                                    prompt = (
+                                        "Оцени подпись изображения по релевантности и полноте. "
+                                        "Верни ЧИСЛО 1–10 и краткое объяснение в 1–2 предложения.\n"
+                                        f"Эталон: {refs[i]}\nКапшен: {hyps[i]}"
+                                    )
+                                    resp = client.chat.completions.create(
+                                        model=llm_model_name or "gpt-4o-mini",
+                                        messages=[{"role": "user", "content": prompt}],
+                                        temperature=0
+                                    )
+                                    txt = resp.choices[0].message.content.strip()
+                                    st.write(f"#{i+1} → {txt}")
+                                    llm_judgements.append({"ref": refs[i], "hyp": hyps[i], "judge": txt})
+                        except Exception as e:
+                            st.info(f"LLM-оценка недоступна: {e}")
 
-    # ===================== 2) CLIP Retrieval (Text→Image) =====================
-    with st.expander("📦 CLIP Retrieval"):
-        csv_file = st.file_uploader("CSV (text,image)", type=["csv"], key="mm_clip_csv")
-        zip_file = st.file_uploader("ZIP images", type=["zip"], key="mm_clip_zip")
-        n_boot = st.slider("Бутстрэп итераций", 100, 800, 300, 50)
+                    # Быстрая ручная оценка
+                    with st.expander("🧑‍⚖️ Быстрая ручная оценка"):
+                        ratings = []
+                        grid_cols = st.columns(4)
+                        for idx in range(min(12, len(imgs))):
+                            with grid_cols[idx % 4]:
+                                st.image(imgs[idx], use_column_width=True)
+                                st.caption(f"Ref: {refs[idx]}\n\nHyp: {hyps[idx]}")
+                                r = st.slider("Оценка (1–5)", 1, 5, 3, key=f"mm_cap_rate_{idx}")
+                                ratings.append({"ref": refs[idx], "hyp": hyps[idx], "rating": int(r)})
 
-        if csv_file and zip_file:
-            df_pairs = pd.read_csv(csv_file)
-            zbytes = io.BytesIO(zip_file.read())
-            with zipfile.ZipFile(zbytes) as zf:
-                imgs, texts = [], []
-                for _, row in df_pairs.iterrows():
-                    fname, text = str(row["image"]), str(row["text"])
-                    if fname not in zf.namelist():
-                        st.warning(f"Нет файла в ZIP: {fname}")
-                        continue
-                    with zf.open(fname) as f:
-                        imgs.append(Image.open(io.BytesIO(f.read())).convert("RGB"))
-                    texts.append(text)
+                    mm_add_history({
+                        "type": "caption_eval",
+                        "metrics": {"bleu": bleu, "rouge_l": rouge, "cider_light": cider_val, "spice_light": spice_val,
+                                    "distinct_2": dist2, "self_bleu": sbleu, "clipscore": clip_score_val},
+                        "llm": llm_judgements[:],
+                    })
+                    st.success("Готово. Результаты добавлены в Историю.")
+
+    # ===================== 2) Retrieval Evaluation =====================
+    with tab_ret:
+        st.subheader("🔎 Оценка Retrieval (Text→Image)")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            csv_ret = st.file_uploader("CSV (text,image)", type=["csv"], key="mm_ret_csv")
+        with c2:
+            zip_ret = st.file_uploader("ZIP images", type=["zip"], key="mm_ret_zip")
+        with c3:
+            n_boot = st.slider("Бутстрэп итераций", 100, 800, 300, 50, key="mm_ret_boot")
+
+        if st.button("Запустить Retrieval", type="primary", key="mm_ret_run"):
+            if not (csv_ret and zip_ret):
+                st.warning("Загрузите CSV и ZIP с изображениями.")
+            else:
+                df = pd.read_csv(csv_ret)
+                zbytes = io.BytesIO(zip_ret.read())
+                with zipfile.ZipFile(zbytes) as zf:
+                    imgs, texts = [], []
+                    for _, row in df.iterrows():
+                        text = str(row.get("text", str(row.iloc[0])))
+                        fname = str(row.get("image", str(row.iloc[1])))
+                        if fname not in zf.namelist():
+                            st.warning(f"Нет файла в ZIP: {fname}")
+                            continue
+                        with zf.open(fname) as f:
+                            imgs.append(Image.open(io.BytesIO(f.read())).convert("RGB"))
+                        texts.append(text)
 
                 if imgs:
-                    with torch.no_grad():
-                        t_emb = clip_model_a.get_text_features(**clip_proc_a(text=texts, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
-                        i_emb = clip_model_a.get_image_features(**clip_proc_a(images=imgs, return_tensors="pt")).cpu().numpy()
-                    sim_a = _cosine_sim(t_emb, i_emb)
-
-                    r1, r5, r10 = recall_at_k(sim_a, 1), recall_at_k(sim_a, 5), recall_at_k(sim_a, 10)
-                    map_score, ndcg_score, med_rank = mean_average_precision(sim_a), ndcg(sim_a), median_rank(sim_a)
-
-                    c1, c2, c3, c4, c5, c6 = st.columns(6)
-                    c1.metric("R@1", f"{r1:.3f}")
-                    c2.metric("R@5", f"{r5:.3f}")
-                    c3.metric("R@10", f"{r10:.3f}")
-                    c4.metric("mAP", f"{map_score:.3f}")
-                    c5.metric("nDCG@10", f"{ndcg_score:.3f}")
-                    c6.metric("Median Rank", f"{med_rank:.1f}")
-
-                    ks = list(range(1, min(21, sim_a.shape[1] + 1)))
-                    curve = pd.DataFrame({"k": ks, "Recall@k": [recall_at_k(sim_a, k) for k in ks]})
-                    st.line_chart(curve.set_index("k"))
-
-                    sim_sym = sim_a.T
-                    r1_img = recall_at_k(sim_sym, 1)
-                    st.caption(f"Image→Text R@1: {r1_img:.3f}")
-
-                    # ======== A/B сравнение и распределения бутстрэпа ========
-                    if clip_model_b is not None:
+                    if clip_model_a is None or clip_proc_a is None or torch is None:
+                        st.error("CLIP (A) не загружен.")
+                    else:
                         with torch.no_grad():
-                            t_emb_b = clip_model_b.get_text_features(**clip_proc_b(text=texts, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
-                            i_emb_b = clip_model_b.get_image_features(**clip_proc_b(images=imgs, return_tensors="pt")).cpu().numpy()
-                        sim_b = _cosine_sim(t_emb_b, i_emb_b)
+                            t_emb_a = clip_model_a.get_text_features(**clip_proc_a(text=texts, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
+                            i_emb_a = clip_model_a.get_image_features(**clip_proc_a(images=imgs, return_tensors="pt")).cpu().numpy()
+                        sim_a = mm_cosine_sim(t_emb_a, i_emb_a)
 
-                        diffs_r1 = bootstrap_metric_diff(sim_a.shape[0], recall_at_k, sim_a, sim_b, iters=n_boot, k=1)
-                        diffs_map = bootstrap_metric_diff(sim_a.shape[0], mean_average_precision, sim_a, sim_b, iters=n_boot)
-                        diffs_ndcg = bootstrap_metric_diff(sim_a.shape[0], ndcg, sim_a, sim_b, iters=n_boot, k=10)
+                        r1, r5, r10 = mm_recall_at_k(sim_a, 1), mm_recall_at_k(sim_a, 5), mm_recall_at_k(sim_a, 10)
+                        map_score = mm_mean_average_precision(sim_a)
+                        ndcg10 = mm_ndcg(sim_a, 10)
+                        med_rank = mm_median_rank(sim_a)
 
-                        # Метрики разниц (средние)
-                        m_r1, m_map, m_ndcg = float(np.mean(diffs_r1)), float(np.mean(diffs_map)), float(np.mean(diffs_ndcg))
-                        d1, d2, d3 = st.columns(3)
-                        d1.metric("ΔR@1 (B−A)", f"{m_r1:+.3f}")
-                        d2.metric("ΔmAP (B−A)", f"{m_map:+.3f}")
-                        d3.metric("ΔnDCG@10 (B−A)", f"{m_ndcg:+.3f}")
+                        m1, m2, m3, m4, m5, m6 = st.columns(6)
+                        m1.metric("R@1", f"{r1:.3f}")
+                        m2.metric("R@5", f"{r5:.3f}")
+                        m3.metric("R@10", f"{r10:.3f}")
+                        m4.metric("mAP", f"{map_score:.3f}")
+                        m5.metric("nDCG@10", f"{ndcg10:.3f}")
+                        m6.metric("Median Rank", f"{med_rank:.1f}")
 
-                        # Подготовка данных
-                        df_boot = pd.DataFrame({
-                            "ΔR@1": diffs_r1,
-                            "ΔmAP": diffs_map,
-                            "ΔnDCG@10": diffs_ndcg
+                        # Кривая Recall@k
+                        ks = list(range(1, min(21, sim_a.shape[1] + 1)))
+                        curve = pd.DataFrame({"k": ks, "Recall@k": [mm_recall_at_k(sim_a, k) for k in ks]})
+                        try:
+                            st.line_chart(curve.set_index("k"))
+                        except Exception:
+                            st.dataframe(curve)
+
+                        # Симметричная метрика Image→Text
+                        r1_img = mm_recall_at_k(sim_a.T, 1)
+                        st.caption(f"Image→Text R@1: {r1_img:.3f}")
+
+                        ab_result = None
+                        df_boot_long = None
+
+                        # ======== A/B сравнение с бутстрэпом ========
+                        if enable_ab and clip_model_b is not None and clip_proc_b is not None:
+                            with torch.no_grad():
+                                t_emb_b = clip_model_b.get_text_features(**clip_proc_b(text=texts, return_tensors="pt", padding=True, truncation=True)).cpu().numpy()
+                                i_emb_b = clip_model_b.get_image_features(**clip_proc_b(images=imgs, return_tensors="pt")).cpu().numpy()
+                            sim_b = mm_cosine_sim(t_emb_b, i_emb_b)
+
+                            diffs_r1 = mm_bootstrap_metric_diff(sim_a.shape[0], mm_recall_at_k, sim_a, sim_b, iters=int(n_boot), k=1)
+                            diffs_map = mm_bootstrap_metric_diff(sim_a.shape[0], mm_mean_average_precision, sim_a, sim_b, iters=int(n_boot))
+                            diffs_ndcg = mm_bootstrap_metric_diff(sim_a.shape[0], mm_ndcg, sim_a, sim_b, iters=int(n_boot), k=10)
+
+                            m_r1, m_map, m_ndcg = float(np.mean(diffs_r1)), float(np.mean(diffs_map)), float(np.mean(diffs_ndcg))
+                            d1, d2, d3 = st.columns(3)
+                            d1.metric("ΔR@1 (B−A)", f"{m_r1:+.3f}")
+                            d2.metric("ΔmAP (B−A)", f"{m_map:+.3f}")
+                            d3.metric("ΔnDCG@10 (B−A)", f"{m_ndcg:+.3f}")
+
+                            # Визуализация распределений
+                            try:
+                                import pandas as _pd
+                                df_boot = _pd.DataFrame({"ΔR@1": diffs_r1, "ΔmAP": diffs_map, "ΔnDCG@10": diffs_ndcg})
+                                df_boot_long = df_boot.melt(var_name="metric", value_name="delta")
+                                cols = st.columns(3)
+                                if alt is not None:
+                                    for ci, metric_name in enumerate(["ΔR@1", "ΔmAP", "ΔnDCG@10"]):
+                                        chart = alt.Chart(df_boot[[metric_name]].rename(columns={metric_name: "delta"})).mark_bar().encode(
+                                            x=alt.X("delta:Q", bin=alt.Bin(maxbins=40), title=metric_name),
+                                            y=alt.Y("count():Q", title="Count")
+                                        ).properties(height=180)
+                                        cols[ci].altair_chart(chart, use_container_width=True)
+                                elif plt is not None:
+                                    fig, axes = plt.subplots(1, 3, figsize=(12, 3))
+                                    axes[0].hist(diffs_r1, bins=30); axes[0].set_title("ΔR@1")
+                                    axes[1].hist(diffs_map, bins=30); axes[1].set_title("ΔmAP")
+                                    axes[2].hist(diffs_ndcg, bins=30); axes[2].set_title("ΔnDCG@10")
+                                    for ax in axes: ax.grid(True, linestyle=":", alpha=0.4)
+                                    st.pyplot(fig)
+                            except Exception:
+                                pass
+
+                            # Экспорт CSV распределений
+                            if df_boot_long is not None:
+                                csv_bytes = df_boot_long.to_csv(index=False).encode("utf-8")
+                                st.download_button("Скачать распределения бутстрэпа (CSV)", data=csv_bytes,
+                                                   file_name="ab_bootstrap_distributions.csv", mime="text/csv")
+
+                        # LLM-сводка результатов (опционально)
+                        llm_summary = None
+                        if use_llm_eval and llm_api_key and OpenAI is not None:
+                            try:
+                                client = OpenAI(api_key=llm_api_key, base_url=llm_api_base or None)
+                                prompt = (
+                                    "Суммируй результаты retrieval-оценки. Объясни значения метрик и выводы A/B-теста кратко.\n"
+                                    f"R@1={r1:.3f}, R@5={r5:.3f}, R@10={r10:.3f}, mAP={map_score:.3f}, nDCG@10={ndcg10:.3f}, MedRank={med_rank:.1f}.\n"
+                                    f"A/B: {'включён' if enable_ab else 'выключен'}."
+                                )
+                                resp = client.chat.completions.create(
+                                    model=llm_model_name or "gpt-4o-mini",
+                                    messages=[{"role": "user", "content": prompt}],
+                                    temperature=0
+                                )
+                                llm_summary = resp.choices[0].message.content.strip()
+                                st.info(llm_summary)
+                            except Exception as e:
+                                st.info(f"LLM-сводка недоступна: {e}")
+
+                        mm_add_history({
+                            "type": "retrieval_eval",
+                            "metrics": {"r1": r1, "r5": r5, "r10": r10, "map": map_score, "ndcg@10": ndcg10,
+                                        "median_rank": med_rank, "img2text_r1": float(r1_img)},
+                            "ab_enabled": bool(enable_ab),
+                            "llm_summary": llm_summary
                         })
-                        df_long = df_boot.melt(var_name="metric", value_name="delta")
+                        st.success("Готово. Результаты добавлены в Историю.")
 
-                        # Гистограммы Altair для каждого метрика
-                        cols = st.columns(3)
-                        for col_idx, metric_name in enumerate(["ΔR@1", "ΔmAP", "ΔnDCG@10"]):
-                            chart = alt.Chart(df_boot[[metric_name]].rename(columns={metric_name:"delta"})).mark_bar().encode(
-                                x=alt.X("delta:Q", bin=alt.Bin(maxbins=40), title=metric_name),
-                                y=alt.Y("count():Q", title="Count")
-                            ).properties(height=200)
-                            cols[col_idx].altair_chart(chart, use_container_width=True)
+    # ===================== 3) Image Generation Evaluation (approx) =====================
+    with tab_gen:
+        st.subheader("🎨 Оценка генерации изображений (приближённо)")
+        st.caption("CLIP-FID (приближённый) в CLIP-пространстве + соответствие prompt→image по CLIPScore.")
 
-                        # Экспорт CSV
-                        csv_bytes = df_long.to_csv(index=False).encode("utf-8")
-                        st.download_button("Скачать распределения бутстрэпа (CSV)", data=csv_bytes, file_name="ab_bootstrap_distributions.csv", mime="text/csv")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            zip_real = st.file_uploader("ZIP Real Images", type=["zip"], key="mm_gen_zip_real")
+        with c2:
+            zip_gen = st.file_uploader("ZIP Generated Images", type=["zip"], key="mm_gen_zip_gen")
+        with c3:
+            csv_prompts = st.file_uploader("CSV (prompt, gen_image)", type=["csv"], key="mm_gen_csv_prompts")
 
-                        # Экспорт PNG (матплотлиб)
-                        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-                        axes[0].hist(diffs_r1, bins=30)
-                        axes[0].set_title("ΔR@1")
-                        axes[1].hist(diffs_map, bins=30)
-                        axes[1].set_title("ΔmAP")
-                        axes[2].hist(diffs_ndcg, bins=30)
-                        axes[2].set_title("ΔnDCG@10")
-                        for ax in axes:
-                            ax.grid(True, linestyle=":", alpha=0.4)
-                        fig.tight_layout()
-                        png_buf = io.BytesIO()
-                        fig.savefig(png_buf, format="png", dpi=150)
-                        st.download_button("Скачать гистограммы (PNG)", data=png_buf.getvalue(), file_name="ab_bootstrap_hist.png", mime="image/png")
+        if st.button("Оценить генерацию", type="primary", key="mm_gen_run"):
+            # Загрузка изображений
+            real_imgs, gen_imgs = [], []
+            if zip_real:
+                with zipfile.ZipFile(io.BytesIO(zip_real.read())) as zf:
+                    for name in zf.namelist():
+                        try:
+                            with zf.open(name) as f:
+                                real_imgs.append(Image.open(io.BytesIO(f.read())).convert("RGB"))
+                        except Exception:
+                            continue
+            if zip_gen:
+                bytes_gen = io.BytesIO(zip_gen.read())
+                with zipfile.ZipFile(bytes_gen) as zf:
+                    for name in zf.namelist():
+                        try:
+                            with zf.open(name) as f:
+                                gen_imgs.append(Image.open(io.BytesIO(f.read())).convert("RGB"))
+                        except Exception:
+                            continue
 
-    # ===================== История =====================
-    if st.session_state["mm_history"]:
-        st.sidebar.header("История (мультимодал)")
-        import json
-        def _safe(obj):
-            if isinstance(obj, (str, int, float, bool)) or obj is None:
-                return obj
-            if isinstance(obj, dict):
-                return {k: _safe(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple, set)):
-                return [_safe(v) for v in obj]
-            return str(obj)
-        st.sidebar.download_button(
-            "Скачать историю (JSON)",
-            data=json.dumps(_safe(st.session_state["mm_history"]), ensure_ascii=False, indent=2).encode("utf-8"),
-            file_name="mm_history.json",
-            mime="application/json",
-        )
+            metrics = {}
+            if real_imgs and gen_imgs:
+                cfid = mm_clip_fid(clip_model_a, clip_proc_a, real_imgs, gen_imgs)
+                metrics["CLIP-FID (approx)"] = cfid
+
+            # Соответствие промптов и сгенерированных изображений
+            if csv_prompts is not None and zip_gen is not None:
+                dfp = pd.read_csv(csv_prompts)
+                gen_map = {}
+                with zipfile.ZipFile(bytes_gen) as zf:
+                    for name in zf.namelist():
+                        try:
+                            gen_map[name] = zf.read(name)
+                        except Exception:
+                            pass
+                hyps, imgs = [], []
+                for _, row in dfp.iterrows():
+                    prompt = str(row.get("prompt", ""))
+                    gname = str(row.get("gen_image", ""))
+                    if gname in gen_map:
+                        try:
+                            img = Image.open(io.BytesIO(gen_map[gname])).convert("RGB")
+                        except Exception:
+                            continue
+                        imgs.append(img)
+                        hyps.append(prompt)
+                if imgs:
+                    clipscore_ti = mm_clipscore(clip_model_a, clip_proc_a, hyps, imgs)
+                    metrics["CLIPScore (prompt→image)"] = clipscore_ti
+
+            if metrics:
+                cols = st.columns(len(metrics))
+                for i, (k, v) in enumerate(metrics.items()):
+                    cols[i].metric(k, f"{v:.3f}")
+                mm_add_history({"type": "imagegen_eval", "metrics": metrics})
+                st.success("Готово. Результаты добавлены в Историю.")
+            else:
+                st.warning("Недостаточно данных для расчёта метрик.")
+
+    # ===================== 4) VQA / Reasoning Eval (simple) =====================
+    with tab_vqa:
+        st.subheader("❓ VQA / Reasoning (простая проверка)")
+        st.caption("Exact match по ответу + опциональный LLM-судья для семантического совпадения.")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            csv_vqa = st.file_uploader("CSV (image, question, answer)", type=["csv"], key="mm_vqa_csv")
+        with c2:
+            zip_vqa = st.file_uploader("ZIP images", type=["zip"], key="mm_vqa_zip")
+        with c3:
+            max_samples = st.number_input("Макс. примеров", 1, 2000, 200, key="mm_vqa_max")
+
+        if st.button("Запустить VQA", type="primary", key="mm_vqa_run"):
+            if not (csv_vqa and zip_vqa):
+                st.warning("Загрузите CSV и ZIP с изображениями.")
+            else:
+                df = pd.read_csv(csv_vqa)
+                correct, total = 0, 0
+                examples = []
+                with zipfile.ZipFile(io.BytesIO(zip_vqa.read())) as zf:
+                    for i, row in df.head(int(max_samples)).iterrows():
+                        fname = str(row.get("image", ""))
+                        q = str(row.get("question", ""))
+                        ans = str(row.get("answer", "")).strip().lower()
+                        if not fname or fname not in zf.namelist():
+                            continue
+                        with zf.open(fname) as f:
+                            img = Image.open(io.BytesIO(f.read())).convert("RGB")
+                        pred = mm_blip_vqa_answer(blip_vqa_model, blip_vqa_proc, img, q).strip().lower()
+                        total += 1
+                        ok = int(pred == ans)
+                        correct += ok
+                        if len(examples) < 16:
+                            examples.append({"image": fname, "q": q, "gt": ans, "pred": pred, "ok": ok})
+
+                acc = (correct / total) if total else 0.0
+                st.metric("Accuracy (exact match)", f"{acc:.3f}")
+
+                # LLM-судья (семантика)
+                if use_llm_eval and llm_api_key and OpenAI is not None and examples:
+                    try:
+                        client = OpenAI(api_key=llm_api_key, base_url=llm_api_base or None)
+                        agree = 0
+                        with st.expander("🤖 LLM-судья (семантическое совпадение)"):
+                            for ex in examples:
+                                prompt = (
+                                    "Проверь семантическую эквивалентность ответа. Ответь только: YES или NO.\n"
+                                    f"Вопрос: {ex['q']}\nИстина: {ex['gt']}\nПредсказание: {ex['pred']}"
+                                )
+                                resp = client.chat.completions.create(
+                                    model=llm_model_name or "gpt-4o-mini",
+                                    messages=[{"role": "user", "content": prompt}],
+                                    temperature=0
+                                )
+                                verdict = resp.choices[0].message.content.strip().upper()
+                                st.write(f"{ex['image']} → {verdict}")
+                                if verdict.startswith("Y"):
+                                    agree += 1
+                        st.caption(f"LLM-согласие на примерах: {agree}/{len(examples)}")
+                    except Exception as e:
+                        st.info(f"LLM-судья недоступен: {e}")
+
+                mm_add_history({"type": "vqa_eval", "accuracy": float(acc), "samples": int(total)})
+                st.success("Готово. Результаты добавлены в Историю.")
+
+    # ===================== 5) История =====================
+    with tab_hist:
+        st.subheader("🗂️ История мультимодальных экспериментов")
+        if st.session_state["mm_history"]:
+            st.json(st.session_state["mm_history"][-10:])
+            data = json.dumps(st.session_state["mm_history"], ensure_ascii=False, indent=2).encode("utf-8")
+            st.download_button("Скачать историю (JSON)", data=data, file_name="mm_history.json", mime="application/json")
+        else:
+            st.info("История пуста. Запустите одну из оценок выше.")
